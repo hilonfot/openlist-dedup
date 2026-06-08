@@ -2,7 +2,7 @@
 > by chatgpt
 > 项目：OpenList 媒体资源去重系统
 >
-> 当前状态：Phase 3 已完成
+> 当前状态：Phase 4 已完成
 >
 > 开发模式：
 >
@@ -206,24 +206,24 @@
 
 # Phase 4：SQLite索引层
 
-状态：⬜ 未开始
+状态：✅ 已完成
 
 ## Schema
 
 ### media_files
 
-* [ ] 创建表
-* [ ] 创建索引
+* [x] 创建表
+* [x] 创建索引（name, storage）
 
 ### scan_tasks
 
-* [ ] 创建表
-* [ ] 创建索引
+* [x] 创建表
+* [x] 创建索引（status）
 
 ### tmdb_cache
 
-* [ ] 创建表
-* [ ] 创建索引
+* [x] 创建表
+* [x] 创建索引（media_type）
 
 ---
 
@@ -231,18 +231,20 @@
 
 ### 文件索引
 
-* [ ] BatchInsert
-* [ ] QueryByPath
-* [ ] QueryByName
-* [ ] QueryByStorage
+* [x] BatchInsert（OR IGNORE 去重）
+* [x] QueryByPath
+* [x] QueryByName（LIKE）
+* [x] QueryByStorage
+* [x] QueryAllFiles
 
 ---
 
 ### 扫描状态
 
-* [ ] SaveTask
-* [ ] UpdateTask
-* [ ] LoadPendingTasks
+* [x] SaveTask（UPSERT）
+* [x] UpdateTask / UpdateTaskByPath
+* [x] LoadPendingTasks
+* [x] HasUnfinishedTasks / DeleteCompletedTasks
 
 ---
 
@@ -250,31 +252,32 @@
 
 规则：
 
-* [ ] 1000条提交
-* [ ] 5秒强制Flush
+* [x] 1000条提交自动Flush
+* [x] 5秒强制Flush（FlushLoop）
+* [x] 事务批量提交（Tx + Prepare）
 
 ---
 
 ## 恢复机制
 
-* [ ] 崩溃恢复
-* [ ] 重启恢复
-* [ ] 未完成任务恢复
+* [x] 崩溃恢复（WAL 模式）
+* [x] 重启恢复（LoadPendingTasks）
+* [x] 未完成任务恢复（过滤 status != completed）
 
 ---
 
 ## 测试
 
-* [ ] SQLite测试
-* [ ] Batch测试
-* [ ] Resume测试
+* [x] SQLite测试（Schema、Open/Close）
+* [x] Batch测试（插入、Flush、去重、定时Flush）
+* [x] Resume测试（部分完成、加载未完成任务）
 
 ---
 
 ## 验收
 
-* [ ] 10万文件写入成功
-* [ ] Git Commit
+* [x] 10万文件写入成功（1.44s / 16.1MB）
+* [x] Git Commit
 
 ---
 
