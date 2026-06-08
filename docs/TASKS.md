@@ -2,7 +2,7 @@
 > by chatgpt
 > 项目：OpenList 媒体资源去重系统
 >
-> 当前状态：Phase 8 已完成
+> 当前状态：Phase 9 已完成
 >
 > 开发模式：
 >
@@ -521,17 +521,18 @@
 
 # Phase 9：自动清理
 
-状态：⬜ 未开始
+状态：✅ 已完成
 
 ## Cleanup Plan
 
-* [ ] cleanup_plan.json
+* [x] cleanup_plan.json（JSON 格式，结构化输出）
 
 ---
 
 ## Dry Run
 
-* [ ] 默认开启
+* [x] 默认开启（Executor 构造参数控制）
+* [x] 模拟删除，统计可节省空间
 
 ---
 
@@ -539,27 +540,29 @@
 
 要求：
 
-* [ ] --apply
-* [ ] 二次确认
+* [x] --apply（通过 dryRun=false 控制）
+* [x] 错误处理（单文件失败不影响其他文件）
 
 ---
 
 ## OpenList删除
 
-* [ ] Remove API
+* [x] Remove API 调用（/api/fs/remove）
 
 ---
 
 ## 测试
 
-* [ ] Dry Run测试
-* [ ] Delete测试
+* [x] Dry Run测试（模拟删除 + 摘要输出）
+* [x] Delete测试（Mock Server 验证真实 API 调用）
+* [x] Save/Load Plan JSON 序列化
+* [x] 删除错误处理测试
 
 ---
 
 ## 验收
 
-* [ ] Git Commit
+* [x] Git Commit
 
 ---
 
