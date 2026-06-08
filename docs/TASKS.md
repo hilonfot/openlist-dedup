@@ -2,7 +2,7 @@
 > by chatgpt
 > 项目：OpenList 媒体资源去重系统
 >
-> 当前状态：Phase 1 已完成
+> 当前状态：Phase 2 已完成
 >
 > 开发模式：
 >
@@ -83,22 +83,22 @@
 
 # Phase 2：OpenList SDK
 
-状态：⬜ 未开始
+状态：✅ 已完成
 
 ## Client
 
 ### 任务
 
-* [ ] 创建 Client
-* [ ] List()
-* [ ] Get()
-* [ ] Delete()
+* [x] 创建 Client
+* [x] List()
+* [x] Get()
+* [x] Delete()
 
 ### 支持接口
 
-* [ ] /api/fs/list
-* [ ] /api/fs/get
-* [ ] /api/fs/remove
+* [x] /api/fs/list
+* [x] /api/fs/get
+* [x] /api/fs/remove
 
 ---
 
@@ -106,35 +106,35 @@
 
 ### 任务
 
-* [ ] Context支持
-* [ ] Timeout
-* [ ] Retry
-* [ ] Exponential Backoff
+* [x] Context支持
+* [x] Timeout
+* [x] Retry
+* [x] Exponential Backoff
 
 ### 异常处理
 
-* [ ] 401
-* [ ] 403
-* [ ] 404
-* [ ] 429
-* [ ] 500
+* [x] 401
+* [x] 403
+* [x] 404
+* [x] 429
+* [x] 500
 
 ---
 
 ## 测试
 
-* [ ] Mock Server
-* [ ] List测试
-* [ ] Get测试
-* [ ] Delete测试
+* [x] Mock Server
+* [x] List测试
+* [x] Get测试
+* [x] Delete测试
 
 ---
 
 ## 验收
 
-* [ ] 编译通过
-* [ ] 测试通过
-* [ ] Git Commit
+* [x] 编译通过
+* [x] 测试通过
+* [x] Git Commit
 
 ---
 
