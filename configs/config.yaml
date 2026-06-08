@@ -1,0 +1,30 @@
+openlist:
+  url: "http://localhost:5244"
+  password: ""
+  timeout: 30
+  retry_max: 3
+
+scanner:
+  workers: 32
+  queue_size: 10000
+
+database:
+  path: "data/media.db"
+
+tmdb:
+  api_key: ""
+  cache_ttl: 86400
+  rate_limit: 40
+
+log:
+  level: "info"
+  output: "stdout"
+
+storage:
+  local_paths:
+    - "/本地存储/电影"
+    - "/本地存储/电视剧"
+  quark_paths:
+    - "/夸克网盘/电影"
+  tianyi_paths:
+    - "/天翼云盘/电影"

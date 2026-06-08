@@ -7,6 +7,11 @@
 *.dll
 *.so
 *.dylib
+openlist
+openlist.exe
+
+# Build output
+/build/
 
 # Test binary, built with `go test -c`
 *.test
@@ -26,6 +31,13 @@ go.work.sum
 
 # env file
 .env
+
+# Output reports
+report.html
+cleanup_plan.json
+
+# Data directory
+/data/
 
 # Editor/IDE
 # .idea/

@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  openlist:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openlist-scanner
+    restart: unless-stopped
+    volumes:
+      - openlist-data:/app/data
+      - ./configs:/app/configs:ro
+    environment:
+      - OPENLIST_URL=${OPENLIST_URL:-http://host.docker.internal:5244}
+      - OPENLIST_PASSWORD=${OPENLIST_PASSWORD:-}
+      - TMDB_API_KEY=${TMDB_API_KEY:-}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - SCANNER_WORKERS=${SCANNER_WORKERS:-32}
+    command: ["--scan"]
+
+volumes:
+  openlist-data:
