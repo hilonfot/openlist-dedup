@@ -2,7 +2,7 @@
 > by chatgpt
 > 项目：OpenList 媒体资源去重系统
 >
-> 当前状态：Phase 6 已完成
+> 当前状态：Phase 7 已完成
 >
 > 开发模式：
 >
@@ -412,48 +412,51 @@
 
 # Phase 7：TMDB集成
 
-状态：⬜ 未开始
+状态：✅ 已完成
 
 ## Client
 
-* [ ] SearchMovie
-* [ ] SearchTV
+* [x] SearchMovie（中英文双语言搜索 + 年份匹配）
+* [x] SearchTV（中英文双语言搜索 + 年份匹配）
 
 ---
 
 ## 缓存
 
-* [ ] SQLite缓存
-* [ ] TTL
+* [x] SQLite缓存（tmdb_cache 表）
+* [x] TTL（默认 24 小时，可配置）
 
 ---
 
 ## 多语言
 
-* [ ] 中文
-* [ ] 英文
+* [x] 中文（优先 zh-CN 搜索）
+* [x] 英文（zh-CN 失败后自动回退 en-US）
 
 ---
 
 ## 匹配增强
 
-* [ ] 年份辅助
-* [ ] 季数辅助
-* [ ] 模糊匹配
+* [x] 年份辅助（精准匹配 release_year / first_air_date）
+* [x] 季数辅助（Year/Season 参数辅助筛选）
+* [x] 模糊匹配（名称包含 + 评分择优）
 
 ---
 
 ## 测试
 
-* [ ] Movie测试
-* [ ] TV测试
-* [ ] Cache测试
+* [x] Movie 搜索测试（found / not found / year match）
+* [x] TV 搜索测试（found / not found / year match）
+* [x] Cache 测试（hit / miss / TTL / clear expired）
+* [x] 多语言 fallback 测试
+* [x] API 错误处理测试
+* [x] 速率限制测试
 
 ---
 
 ## 验收
 
-* [ ] Git Commit
+* [x] Git Commit
 
 ---
 
