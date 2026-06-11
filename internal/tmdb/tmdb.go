@@ -7,34 +7,37 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
 	"openlist/internal/repository"
 )
 
-const (
-	defaultBaseURL   = "https://api.themoviedb.org/3"
-	defaultRateLimit = 40               // requests per 10 seconds
+	var (
+	defaultRateLimit = 40 // requests per 10 seconds
 	defaultCacheTTL  = 24 * time.Hour
 	requestTimeout   = 10 * time.Second
 )
 
 // Client is a TMDB API client with SQLite caching and rate limiting.
 type Client struct {
-	apiKey    string
-	baseURL   string
-	httpClient *http.Client
-	cache     *repository.DB
-	cacheTTL  time.Duration
-	rateLimit *time.Ticker
+	apiKey       string
+	baseURL      string
+	imageBaseURL string
+	httpClient   *http.Client
+	cache        *repository.DB
+	cacheTTL     time.Duration
+	rateLimit    *time.Ticker
 }
 
 // Config holds TMDB client configuration.
 type Config struct {
-	APIKey    string
-	Cache     *repository.DB
-	CacheTTL  time.Duration
-	RateLimit int // requests per 10 seconds
+	APIKey      string
+	BaseURL     string // API base URL (e.g. https://api.themoviedb.org/3)
+	ImageBaseURL string // image base URL (e.g. https://image.tmdb.org/t/p/w500)
+	Cache       *repository.DB
+	CacheTTL    time.Duration
+	RateLimit   int // requests per 10 seconds
 }
 
 // New creates a new TMDB client.
@@ -50,8 +53,9 @@ func New(cfg Config) *Client {
 	interval := (10 * time.Second) / time.Duration(rateLimit)
 
 	return &Client{
-		apiKey:  cfg.APIKey,
-		baseURL: defaultBaseURL,
+		apiKey:      cfg.APIKey,
+		baseURL:     cfg.BaseURL,
+		imageBaseURL: cfg.ImageBaseURL,
 		httpClient: &http.Client{
 			Timeout: requestTimeout,
 		},
@@ -63,18 +67,33 @@ func New(cfg Config) *Client {
 
 // SearchResult is a single result from TMDB search.
 type SearchResult struct {
-	ID          int64   `json:"id"`
-	Title       string  `json:"title"`
-	Name        string  `json:"name"`
-	ReleaseDate string  `json:"release_date"`
-	FirstAirDate string `json:"first_air_date"`
-	Overview    string  `json:"overview"`
-	VoteAverage float64 `json:"vote_average"`
+	ID           int64   `json:"id"`
+	Title        string  `json:"title"`
+	Name         string  `json:"name"`
+	ReleaseDate  string  `json:"release_date"`
+	FirstAirDate string  `json:"first_air_date"`
+	Overview     string  `json:"overview"`
+	VoteAverage  float64 `json:"vote_average"`
+	PosterPath   string  `json:"poster_path"`
 }
 
 // searchResponse is the top-level TMDB search API response.
 type searchResponse struct {
 	Results []SearchResult `json:"results"`
+}
+
+// movieDetails is the TMDB movie detail API response (only fields we need).
+type movieDetails struct {
+	ID       int64  `json:"id"`
+	Title    string `json:"title"`
+	Overview string `json:"overview"`
+}
+
+// tvDetails is the TMDB TV detail API response (only fields we need).
+type tvDetails struct {
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	Overview string `json:"overview"`
 }
 
 // MovieResult holds the matched movie information.
@@ -84,17 +103,23 @@ type MovieResult struct {
 	ReleaseYear int
 	Overview    string
 	VoteAverage float64
+	PosterPath  string
+	PosterURL   string
+	TMDBURL     string
 	FromCache   bool
 }
 
 // TVResult holds the matched TV series information.
 type TVResult struct {
-	TMDBID      int64
-	Name        string
+	TMDBID       int64
+	Name         string
 	FirstAirYear int
-	Overview    string
-	VoteAverage float64
-	FromCache   bool
+	Overview     string
+	VoteAverage  float64
+	PosterPath   string
+	PosterURL    string
+	TMDBURL      string
+	FromCache    bool
 }
 
 // SearchMovie searches for a movie by name, optionally filtering by year.
@@ -117,6 +142,7 @@ func (c *Client) SearchMovie(ctx context.Context, name string, year int) (*Movie
 		return nil, err
 	}
 	if result != nil {
+				c.saveToCache(ctx, name, "movie", result.TMDBID, result)
 		return result, nil
 	}
 
@@ -126,7 +152,15 @@ func (c *Client) SearchMovie(ctx context.Context, name string, year int) (*Movie
 	}
 
 	if result != nil {
-		// Save to cache
+		// Try to get Chinese title/overview for better display
+		if details, err := c.fetchMovieDetails(ctx, result.TMDBID, "zh-CN"); err == nil {
+			if details.Title != "" {
+				result.Title = details.Title
+			}
+			if details.Overview != "" {
+				result.Overview = details.Overview
+			}
+		}
 		c.saveToCache(ctx, name, "movie", result.TMDBID, result)
 	}
 
@@ -152,6 +186,7 @@ func (c *Client) SearchTV(ctx context.Context, name string, season int, year int
 		return nil, err
 	}
 	if result != nil {
+			c.saveToCache(ctx, name, "tv", result.TMDBID, result)
 		return result, nil
 	}
 
@@ -161,6 +196,15 @@ func (c *Client) SearchTV(ctx context.Context, name string, season int, year int
 	}
 
 	if result != nil {
+		// Try to get Chinese name/overview for better display
+		if details, err := c.fetchTVDetails(ctx, result.TMDBID, "zh-CN"); err == nil {
+			if details.Name != "" {
+				result.Name = details.Name
+			}
+			if details.Overview != "" {
+				result.Overview = details.Overview
+			}
+		}
 		c.saveToCache(ctx, name, "tv", result.TMDBID, result)
 	}
 
@@ -236,6 +280,84 @@ func (c *Client) doSearch(ctx context.Context, mediaType, query, language string
 	return sr.Results, nil
 }
 
+// fetchMovieDetails fetches movie details by ID in the specified language.
+func (c *Client) fetchMovieDetails(ctx context.Context, id int64, language string) (*movieDetails, error) {
+	// Rate limit
+	select {
+	case <-c.rateLimit.C:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	u, _ := url.Parse(fmt.Sprintf("%s/movie/%d", c.baseURL, id))
+	q := u.Query()
+	q.Set("language", language)
+	q.Set("api_key", c.apiKey)
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create movie details request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("movie details http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("tmdb movie details error: status=%d body=%s", resp.StatusCode, string(body))
+	}
+
+	var details movieDetails
+	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
+		return nil, fmt.Errorf("decode movie details: %w", err)
+	}
+
+	return &details, nil
+}
+
+// fetchTVDetails fetches TV series details by ID in the specified language.
+func (c *Client) fetchTVDetails(ctx context.Context, id int64, language string) (*tvDetails, error) {
+	// Rate limit
+	select {
+	case <-c.rateLimit.C:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	u, _ := url.Parse(fmt.Sprintf("%s/tv/%d", c.baseURL, id))
+	q := u.Query()
+	q.Set("language", language)
+	q.Set("api_key", c.apiKey)
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create tv details request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("tv details http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("tmdb tv details error: status=%d body=%s", resp.StatusCode, string(body))
+	}
+
+	var details tvDetails
+	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
+		return nil, fmt.Errorf("decode tv details: %w", err)
+	}
+
+	return &details, nil
+}
+
 // bestMovieMatch selects the best matching movie from search results.
 func (c *Client) bestMovieMatch(results []SearchResult, query string, year int) *MovieResult {
 	queryLower := toLower(query)
@@ -245,7 +367,7 @@ func (c *Client) bestMovieMatch(results []SearchResult, query string, year int) 
 		titleLower := toLower(r.Title)
 		if titleLower == queryLower || similar(titleLower, queryLower) {
 			if year > 0 && extractYear(r.ReleaseDate) == year {
-				return movieFromResult(r)
+				return c.movieFromResult(r)
 			}
 		}
 	}
@@ -254,7 +376,7 @@ func (c *Client) bestMovieMatch(results []SearchResult, query string, year int) 
 	if year > 0 {
 		for _, r := range results {
 			if extractYear(r.ReleaseDate) == year {
-				return movieFromResult(r)
+				return c.movieFromResult(r)
 			}
 		}
 	}
@@ -265,13 +387,13 @@ func (c *Client) bestMovieMatch(results []SearchResult, query string, year int) 
 		for _, r := range results[1:] {
 			titleLower := toLower(r.Title)
 			if titleLower == queryLower {
-				return movieFromResult(r)
+				return c.movieFromResult(r)
 			}
 			if r.VoteAverage > best.VoteAverage && contains(titleLower, queryLower) {
 				best = r
 			}
 		}
-		return movieFromResult(best)
+		return c.movieFromResult(best)
 	}
 
 	return nil
@@ -285,7 +407,7 @@ func (c *Client) bestTVMatch(results []SearchResult, query string, season int, y
 		nameLower := toLower(r.Name)
 		if nameLower == queryLower || similar(nameLower, queryLower) {
 			if year > 0 && extractYear(r.FirstAirDate) == year {
-				return tvFromResult(r)
+				return c.tvFromResult(r)
 			}
 		}
 	}
@@ -293,7 +415,7 @@ func (c *Client) bestTVMatch(results []SearchResult, query string, season int, y
 	if year > 0 {
 		for _, r := range results {
 			if extractYear(r.FirstAirDate) == year {
-				return tvFromResult(r)
+				return c.tvFromResult(r)
 			}
 		}
 	}
@@ -303,13 +425,13 @@ func (c *Client) bestTVMatch(results []SearchResult, query string, season int, y
 		for _, r := range results[1:] {
 			nameLower := toLower(r.Name)
 			if nameLower == queryLower {
-				return tvFromResult(r)
+				return c.tvFromResult(r)
 			}
 			if r.VoteAverage > best.VoteAverage {
 				best = r
 			}
 		}
-		return tvFromResult(best)
+		return c.tvFromResult(best)
 	}
 
 	return nil
@@ -355,14 +477,19 @@ func (c *Client) searchTVCached(ctx context.Context, name, mediaType string, sea
 
 func (c *Client) saveToCache(ctx context.Context, name, mediaType string, tmdbID int64, data interface{}) {
 	if c.cache == nil {
+		fmt.Fprintf(os.Stderr, "TMDB: cache is nil, cannot save %s\n", name)
 		return
 	}
 	jsonData, err := json.Marshal(data)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "TMDB: marshal error for %s: %v\n", name, err)
 		return
 	}
-	// For simplicity, cache without year key — the lookup applies year filtering after cache retrieval
-	_ = c.cache.SaveTMDBCache(ctx, name, mediaType, tmdbID, string(jsonData))
+	if err := c.cache.SaveTMDBCache(ctx, name, mediaType, tmdbID, string(jsonData)); err != nil {
+		fmt.Fprintf(os.Stderr, "TMDB: save error for %s: %v\n", name, err)
+	} else {
+		fmt.Fprintf(os.Stderr, "TMDB: saved %s (%s, id=%d, %d bytes)\n", name, mediaType, tmdbID, len(jsonData))
+	}
 }
 
 // --- Utility ---
@@ -375,25 +502,47 @@ func cacheKey(name string, year int) string {
 	return name
 }
 
+// posterURL constructs a full TMDB image URL from a poster path.
+func (c *Client) posterURL(path string) string {
+	if path == "" {
+		return ""
+	}
+	return c.imageBaseURL + path
+}
+
+// tmdbURL constructs a link to the TMDB page for a movie or TV show.
+func (c *Client) tmdbURL(id int64, mediaType string) string {
+	if id <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("https://www.themoviedb.org/%s/%d", mediaType, id)
+}
+
 // movieFromResult converts a SearchResult to MovieResult.
-func movieFromResult(r SearchResult) *MovieResult {
+func (c *Client) movieFromResult(r SearchResult) *MovieResult {
 	return &MovieResult{
 		TMDBID:      r.ID,
 		Title:       r.Title,
 		ReleaseYear: extractYear(r.ReleaseDate),
 		Overview:    r.Overview,
 		VoteAverage: r.VoteAverage,
+		PosterPath:  r.PosterPath,
+		PosterURL:   c.posterURL(r.PosterPath),
+		TMDBURL:     c.tmdbURL(r.ID, "movie"),
 	}
 }
 
 // tvFromResult converts a SearchResult to TVResult.
-func tvFromResult(r SearchResult) *TVResult {
+func (c *Client) tvFromResult(r SearchResult) *TVResult {
 	return &TVResult{
 		TMDBID:       r.ID,
 		Name:         r.Name,
 		FirstAirYear: extractYear(r.FirstAirDate),
 		Overview:     r.Overview,
 		VoteAverage:  r.VoteAverage,
+		PosterPath:   r.PosterPath,
+		PosterURL:    c.posterURL(r.PosterPath),
+		TMDBURL:      c.tmdbURL(r.ID, "tv"),
 	}
 }
 

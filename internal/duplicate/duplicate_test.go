@@ -171,7 +171,7 @@ func TestDetect_DuplicateEpisode(t *testing.T) {
 	if !groups[0].IsEpisode {
 		t.Errorf("expected IsEpisode true")
 	}
-	if groups[0].EpisodeTag != "S01E01" {
+	if groups[0].EpisodeTag != folderLevelTag {
 		t.Errorf("expected EpisodeTag S01E01, got %s", groups[0].EpisodeTag)
 	}
 	if stats.DuplicateSets != 1 {
@@ -181,19 +181,27 @@ func TestDetect_DuplicateEpisode(t *testing.T) {
 
 func TestDetect_DifferentEpisodes(t *testing.T) {
 	d := New()
+	// Same show folder on different storages → should be in same group (folder-level dedup)
+	// Different show folders → should be in different groups
 	entries := []FileEntry{
-		makeFile(1, "local", "Breaking.Bad.S01E01.1080p.mkv", "/local/bb/s01e01.mkv", 500000000),
-		makeFile(2, "local", "Breaking.Bad.S01E02.1080p.mkv", "/local/bb/s01e02.mkv", 500000000),
+		makeFile(1, "quark", "狂飙_S01E01.mp4", "/quark/电视剧/狂飙/狂飙_S01E01.mp4", 500000000),
+		makeFile(2, "quark", "狂飙_S01E02.mp4", "/quark/电视剧/狂飙/狂飙_S01E02.mp4", 500000000),
+		makeFile(3, "tianyi", "狂飙_S01E01.mp4", "/tianyi/电视剧/狂飙/狂飙_S01E01.mp4", 500000000),
+		makeFile(4, "quark", "漫长的季节_S01E01.mp4", "/quark/电视剧/漫长的季节/漫长的季节_S01E01.mp4", 800000000),
 	}
 
 	groups, stats := d.Detect(entries)
 
-	// Different episodes should be in different groups
+	// 狂飙 from quark and tianyi should be in one folder-level group
+	// 漫长的季节 should be another group (different folder)
 	if len(groups) != 2 {
-		t.Fatalf("expected 2 groups, got %d", len(groups))
+		t.Fatalf("expected 2 groups (狂飙 folder, 漫长的季节 folder), got %d", len(groups))
 	}
-	if stats.UniqueFiles != 2 {
-		t.Errorf("expected 2 unique files, got %d", stats.UniqueFiles)
+	if stats.DuplicateSets != 1 {
+		t.Errorf("expected 1 duplicate set (狂飙 across storages), got %d", stats.DuplicateSets)
+	}
+	if stats.UniqueFiles != 1 {
+		t.Errorf("expected 1 unique file (漫长的季节), got %d", stats.UniqueFiles)
 	}
 }
 

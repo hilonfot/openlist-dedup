@@ -22,6 +22,7 @@ type Config struct {
 // OpenListConfig holds connection settings for the OpenList API.
 type OpenListConfig struct {
 	URL      string `yaml:"url"       env:"OPENLIST_URL"       json:"url"`
+	Username string `yaml:"username"  env:"OPENLIST_USERNAME"  json:"username"`
 	Password string `yaml:"password"  env:"OPENLIST_PASSWORD"  json:"password"`
 	Timeout  int    `yaml:"timeout"   env:"OPENLIST_TIMEOUT"   json:"timeout"`
 	RetryMax int    `yaml:"retry_max" env:"OPENLIST_RETRY_MAX" json:"retry_max"`
@@ -40,9 +41,11 @@ type DatabaseConfig struct {
 
 // TMDBConfig holds TMDB API settings.
 type TMDBConfig struct {
-	APIKey    string `yaml:"api_key"     env:"TMDB_API_KEY"     json:"api_key"`
-	CacheTTL  int    `yaml:"cache_ttl"   env:"TMDB_CACHE_TTL"   json:"cache_ttl"`
-	RateLimit int    `yaml:"rate_limit"  env:"TMDB_RATE_LIMIT"  json:"rate_limit"`
+	APIKey       string `yaml:"api_key"       env:"TMDB_API_KEY"       json:"api_key"`
+	BaseURL      string `yaml:"base_url"      env:"TMDB_BASE_URL"      json:"base_url"`
+	ImageBaseURL string `yaml:"image_base_url" env:"TMDB_IMAGE_BASE_URL" json:"image_base_url"`
+	CacheTTL     int    `yaml:"cache_ttl"     env:"TMDB_CACHE_TTL"     json:"cache_ttl"`
+	RateLimit    int    `yaml:"rate_limit"    env:"TMDB_RATE_LIMIT"    json:"rate_limit"`
 }
 
 // LogConfig holds logging settings.
@@ -63,6 +66,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		OpenList: OpenListConfig{
 			URL:      "http://localhost:5244",
+			Username: "",
 			Password: "",
 			Timeout:  30,
 			RetryMax: 3,
@@ -75,10 +79,12 @@ func DefaultConfig() *Config {
 			Path: "data/media.db",
 		},
 		TMDB: TMDBConfig{
-			APIKey:    "",
-			CacheTTL:  86400,
-			RateLimit: 40,
-		},
+				APIKey:       "",
+				BaseURL:      "https://api.themoviedb.org/3",
+				ImageBaseURL: "https://image.tmdb.org/t/p/w500",
+				CacheTTL:     86400,
+				RateLimit:    40,
+			},
 		Log: LogConfig{
 			Level:  "info",
 			Output: "stdout",
@@ -118,6 +124,8 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
+	// Restore defaults for TMDB fields that YAML or env left empty
+	cfg.applyTMDBDefaults()
 	cfg.applyEnvOverrides()
 
 	if err := cfg.Validate(); err != nil {
@@ -149,8 +157,19 @@ func (c *Config) Validate() error {
 
 // applyEnvOverrides walks the config and replaces fields tagged with `env`
 // when the corresponding environment variable is set.
+// applyTMDBDefaults restores default values for TMDB fields that were set to
+// empty strings by the YAML config (they are intended to come from env vars).
+func (c *Config) applyTMDBDefaults() {
+	if c.TMDB.BaseURL == "" {
+		c.TMDB.BaseURL = "https://api.themoviedb.org/3"
+	}
+	if c.TMDB.ImageBaseURL == "" {
+		c.TMDB.ImageBaseURL = "https://image.tmdb.org/t/p/w500"
+	}
+}
 func (c *Config) applyEnvOverrides() {
 	override(&c.OpenList.URL, os.Getenv("OPENLIST_URL"))
+	override(&c.OpenList.Username, os.Getenv("OPENLIST_USERNAME"))
 	override(&c.OpenList.Password, os.Getenv("OPENLIST_PASSWORD"))
 	overrideStringToInt(&c.OpenList.Timeout, os.Getenv("OPENLIST_TIMEOUT"))
 	overrideStringToInt(&c.OpenList.RetryMax, os.Getenv("OPENLIST_RETRY_MAX"))
@@ -161,6 +180,8 @@ func (c *Config) applyEnvOverrides() {
 	override(&c.Database.Path, os.Getenv("DATABASE_PATH"))
 
 	override(&c.TMDB.APIKey, os.Getenv("TMDB_API_KEY"))
+	override(&c.TMDB.BaseURL, os.Getenv("TMDB_BASE_URL"))
+	override(&c.TMDB.ImageBaseURL, os.Getenv("TMDB_IMAGE_BASE_URL"))
 	overrideStringToInt(&c.TMDB.CacheTTL, os.Getenv("TMDB_CACHE_TTL"))
 	overrideStringToInt(&c.TMDB.RateLimit, os.Getenv("TMDB_RATE_LIMIT"))
 

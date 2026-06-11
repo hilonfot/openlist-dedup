@@ -2,6 +2,10 @@ package scanner
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -144,6 +148,33 @@ func (s *Scanner) worker(ctx context.Context) {
 	}
 }
 
+// buildPath constructs the full path for an item. If the API returns an empty
+// path, we join the parent path with the item name.
+func buildPath(parentPath, itemPath, itemName string) string {
+	if itemPath != "" {
+		return itemPath
+	}
+	if parentPath == "" || parentPath == "/" {
+		return "/" + itemName
+	}
+	return parentPath + "/" + itemName
+}
+
+// mediaExtensions lists file extensions considered as media files.
+var mediaExtensions = map[string]bool{
+	".mp4": true, ".mkv": true, ".avi": true, ".mov": true,
+	".wmv": true, ".flv": true, ".webm": true, ".m4v": true,
+	".ts": true, ".mts": true, ".m2ts": true, ".iso": true,
+	".mpeg": true, ".mpg": true, ".3gp": true, ".vob": true,
+	".ogm": true, ".ogv": true, ".asf": true, ".rm": true, ".rmvb": true,
+}
+
+// isMediaFile checks if a file name has a recognized media extension.
+func isMediaFile(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	return mediaExtensions[ext]
+}
+
 // processTask handles a single scan task by listing the directory and
 // dispatching sub-tasks for directories and results for files.
 func (s *Scanner) processTask(ctx context.Context, task ScanTask) {
@@ -151,14 +182,28 @@ func (s *Scanner) processTask(ctx context.Context, task ScanTask) {
 
 	result, err := s.client.List(ctx, task.Path)
 	if err != nil {
-		// Log error but continue — one failed directory shouldn't stop the scan
+		fmt.Fprintf(os.Stderr, "ERROR: scanner: list %s: %v\n", task.Path, err)
 		return
 	}
 
+	// Log directory scan progress
+	var dirCount, fileCount int
 	for _, item := range result.Content {
+		if item.IsDir {
+			dirCount++
+		} else {
+			fileCount++
+		}
+	}
+	fmt.Fprintf(os.Stderr, "SCAN: %s: %d dirs, %d files (storage: %s)\n", task.Path, dirCount, fileCount, task.Storage)
+
+	for _, item := range result.Content {
+		// Build path: use API path if available, otherwise construct from parent+name
+		itemPath := buildPath(task.Path, item.Path, item.Name)
+
 		res := ScanResult{
 			Storage:  task.Storage,
-			Path:     item.Path,
+			Path:     itemPath,
 			Name:     item.Name,
 			Size:     item.Size,
 			IsDir:    item.IsDir,
@@ -168,10 +213,10 @@ func (s *Scanner) processTask(ctx context.Context, task ScanTask) {
 		if item.IsDir {
 			// BFS: enqueue sub-directory
 			s.pending.Add(1)
-			if !s.enqueue(ctx, ScanTask{Storage: task.Storage, Path: item.Path}) {
+			if !s.enqueue(ctx, ScanTask{Storage: task.Storage, Path: itemPath}) {
 				return
 			}
-		} else {
+		} else if isMediaFile(item.Name) {
 			s.stats.addFile()
 			// Send result, respecting context cancellation
 			select {
@@ -179,6 +224,9 @@ func (s *Scanner) processTask(ctx context.Context, task ScanTask) {
 				return
 			case s.resultCh <- res:
 			}
+		} else {
+			// Skip non-media files (subtitles, images, etc.)
+			s.stats.addFile()
 		}
 	}
 }

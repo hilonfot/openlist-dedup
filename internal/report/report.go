@@ -5,21 +5,63 @@ import (
 	"fmt"
 	"html/template"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"openlist/internal/duplicate"
+	"openlist/internal/media"
 )
 
-// ReportData holds all data needed to render the HTML report.
 type ReportData struct {
-	GeneratedAt    string
-	MovieGroups    []duplicate.DuplicateGroup
-	TVGroups       []duplicate.DuplicateGroup
-	Stats          duplicate.Stats
-	StorageStats   []StorageStat
+	GeneratedAt     string
+	MovieGroups     []duplicate.DuplicateGroup
+	TVGroups        []duplicate.DuplicateGroup
+	Stats           duplicate.Stats
+	StorageStats    []StorageStat
+	TMDBData        map[string]TMDBItem
+	StorageTrees    []StorageTree
+	Shows           []ShowEntry // flat list of TV shows (for display)
+	Movies          []MovieEntry // flat list of movies (for display)
+	OpenListBaseURL string
 }
 
-// StorageStat holds file statistics for a single storage provider.
+type ShowEntry struct {
+	Name        string
+	Path        string
+	FileCount   int
+	Size        int64
+	Storage     string
+	DupBadge    string
+	PosterURL   string
+	TMDBURL     string
+	Rating      string
+	OpenListURL string
+	TMDBTitle   string
+}
+
+type MovieEntry struct {
+	Name        string
+	Path        string
+	Size        int64
+	Storage     string
+	DupBadge    string
+	PosterURL   string
+	TMDBURL     string
+	Rating      string
+	OpenListURL string
+	TMDBTitle   string
+}
+
+type TMDBItem struct {
+	PosterURL string
+	Overview  string
+	Rating    float64
+	TMDBURL   string
+	Title     string // Chinese title from TMDB
+}
+
 type StorageStat struct {
 	Name       string
 	FileCount  int
@@ -28,102 +70,524 @@ type StorageStat struct {
 	Percentage float64
 }
 
-// Generate creates the HTML report file at the given path.
-func Generate(path string, data ReportData) error {
-	if data.GeneratedAt == "" {
-		data.GeneratedAt = time.Now().Format("2006-01-02 15:04:05")
+type StorageTree struct {
+	Name  string
+	Nodes []FlatNode
+}
+
+type FlatNode struct {
+	Name        string
+	Path        string
+	Indent      int
+	IsDir       bool
+	IsMovie     bool
+	IsTVShow    bool
+	FileCount   int
+	SeasonCount int
+	Size        int64
+	PosterURL   string
+	TMDBURL     string
+	DupBadge    string
+	Rating      string
+	Overview    string
+	OpenListURL string
+	TMDBTitle   string
+}
+
+type dirNode struct {
+	children map[string]*dirNode
+	files    []duplicate.FileEntry
+}
+
+type storageSummary struct {
+	Storage   string
+	Decision  string
+	FileCount int
+	TotalSize int64
+	IsKeep    bool
+	IsDelete  bool
+}
+
+type groupSummary struct {
+	Name        string
+	EpisodeTag  string
+	IsEpisode   bool
+	Storages    []storageSummary
+	TotalSize   int64
+	SavableSize int64
+	Files       []dupFileEntry
+}
+
+type dupFileEntry struct {
+	Name        string
+	Path        string
+	Storage     string
+	Size        int64
+	Decision    string
+	OpenListURL string
+}
+
+func BuildFileTree(entries []duplicate.FileEntry, tmdbData map[string]TMDBItem, groups []duplicate.DuplicateGroup, openListURL string) []StorageTree {
+	dupDecisions := make(map[int64]string)
+	for _, g := range groups {
+		for _, f := range g.Files {
+			if f.Decision == duplicate.Keep {
+				dupDecisions[f.ID] = "keep"
+			} else if f.Decision == duplicate.Delete {
+				dupDecisions[f.ID] = "delete"
+			}
+		}
+	}
+	byStorage := make(map[string][]duplicate.FileEntry)
+	for _, e := range entries {
+		byStorage[e.Storage] = append(byStorage[e.Storage], e)
+	}
+	storageOrder := []string{"local", "quark", "tianyi"}
+	var result []StorageTree
+	for _, name := range storageOrder {
+		files, ok := byStorage[name]
+		if !ok || len(files) == 0 {
+			continue
+		}
+		nodes := buildEntityTree(files, tmdbData, dupDecisions, openListURL)
+		result = append(result, StorageTree{Name: name, Nodes: nodes})
+	}
+	return result
+}
+
+func buildEntityTree(files []duplicate.FileEntry, tmdbData map[string]TMDBItem, decisions map[int64]string, baseURL string) []FlatNode {
+	root := &dirNode{children: make(map[string]*dirNode)}
+	for _, f := range files {
+		parts := splitPath(f.Path)
+		node := root
+		for _, part := range parts[:len(parts)-1] {
+			if child, ok := node.children[part]; ok {
+				node = child
+			} else {
+				child = &dirNode{children: make(map[string]*dirNode)}
+				node.children[part] = child
+				node = child
+			}
+		}
+		node.files = append(node.files, f)
+	}
+	var result []FlatNode
+	flattenEntities(root, 0, "", tmdbData, decisions, baseURL, &result)
+	return result
+}
+
+func flattenEntities(dir *dirNode, depth int, prefix string, tmdbData map[string]TMDBItem, decisions map[int64]string, baseURL string, result *[]FlatNode) {
+	var dirNames []string
+	for name := range dir.children {
+		dirNames = append(dirNames, name)
+	}
+	sort.Strings(dirNames)
+	indent := depth * 24
+
+	sort.Slice(dir.files, func(i, j int) bool {
+		return dir.files[i].Name < dir.files[j].Name
+	})
+
+	// Separate subdirectories into season folders and normal folders
+	var seasonDirs, normalDirs []string
+	for _, name := range dirNames {
+		if isSeasonFolderName(name) {
+			seasonDirs = append(seasonDirs, name)
+		} else {
+			normalDirs = append(normalDirs, name)
+		}
 	}
 
-	// Separate movie and TV groups
-	for _, g := range data.MovieGroups {
-		if g.IsEpisode {
-			data.TVGroups = append(data.TVGroups, g)
+	// CASE 1: Has season subdirectories → emit one combined TV show entity
+	if len(seasonDirs) > 0 {
+		showName := filepath.Base(prefix)
+		var totalFiles int
+		var totalSize int64
+		for _, name := range seasonDirs {
+			fc, sz := countFilesRecursive(dir.children[name])
+			totalFiles += fc
+			totalSize += sz
+		}
+		tmdb, _ := tmdbData[showName]
+		decision := findDecisionInNode(dir, decisions)
+		rating := ""
+		if tmdb.Rating > 0 {
+			rating = fmt.Sprintf("★ %.1f", tmdb.Rating)
+		}
+		*result = append(*result, FlatNode{
+			Name: showName, Path: prefix, Indent: indent, IsTVShow: true,
+			FileCount: totalFiles, Size: totalSize,
+			PosterURL: tmdb.PosterURL, TMDBURL: tmdb.TMDBURL,
+			DupBadge: decision, Rating: rating, Overview: tmdb.Overview,
+			OpenListURL: buildOpenListPath(prefix, baseURL),
+				TMDBTitle: tmdbDisplayTitle(tmdb),		})
+		// Recurse only into non-season subdirectories
+		for _, name := range normalDirs {
+			child := dir.children[name]
+			childPath := prefix + "/" + name
+			if prefix == "" { childPath = name }
+			flattenEntities(child, depth+1, childPath, tmdbData, decisions, baseURL, result)
+		}
+		return
+	}
+
+	// CASE 2: No season folders — handle files directly in this directory
+	hasEpisodes := false
+	hasMovies := false
+	for _, f := range dir.files {
+		if media.Normalize(f.Name).IsEpisode {
+			hasEpisodes = true
+		} else {
+			hasMovies = true
 		}
 	}
-	// Filter — only keep non-episode groups as movie groups
+
+
+		// Fallback: check if files share a common prefix (e.g. "剧名 01.mp4")
+		if !hasEpisodes && hasMovies && len(dir.files) >= 2 {
+			if isNumberedSeries(dir.files) {
+				hasEpisodes = true
+				hasMovies = false
+			}
+		}
+	if hasEpisodes {
+		showName := filepath.Base(prefix)
+		if showName == "" && len(dir.files) > 0 {
+			showName = filepath.Base(filepath.Dir(dir.files[0].Path))
+		}
+		var totalSize int64
+		for _, f := range dir.files { totalSize += f.Size }
+		tmdb, _ := tmdbData[showName]
+		decision := findDecision(dir.files, decisions)
+		rating := ""
+		if tmdb.Rating > 0 { rating = fmt.Sprintf("★ %.1f", tmdb.Rating) }
+		*result = append(*result, FlatNode{
+			Name: showName, Path: prefix, Indent: indent, IsTVShow: true,
+			FileCount: len(dir.files), Size: totalSize,
+			PosterURL: tmdb.PosterURL, TMDBURL: tmdb.TMDBURL,
+			DupBadge: decision, Rating: rating, Overview: tmdb.Overview,
+			OpenListURL: buildOpenListPath(prefix, baseURL),
+				TMDBTitle: tmdbDisplayTitle(tmdb),		})
+	}
+
+	if hasMovies {
+		for _, f := range dir.files {
+			info := media.Normalize(f.Name)
+			if info.IsEpisode { continue }
+			parentName := filepath.Base(filepath.Dir(f.Path))
+			tmdb, hasTMDB := tmdbData[parentName]
+			if !hasTMDB { tmdb, hasTMDB = tmdbData[info.Title] }
+			decision := decisions[f.ID]
+			rating := ""
+			if hasTMDB && tmdb.Rating > 0 { rating = fmt.Sprintf("★ %.1f", tmdb.Rating) }
+			*result = append(*result, FlatNode{
+				Name: f.Name, Path: f.Path, Indent: indent, IsMovie: true, Size: f.Size,
+				PosterURL: tmdb.PosterURL, TMDBURL: tmdb.TMDBURL,
+				DupBadge: decision, Rating: rating, Overview: tmdb.Overview,
+				OpenListURL: buildOpenListPath(f.Path, baseURL),
+				TMDBTitle: tmdbDisplayTitle(tmdb),			})
+		}
+	}
+
+	// Recurse into normal subdirectories
+	for _, name := range normalDirs {
+		child := dir.children[name]
+		childPath := prefix + "/" + name
+		if prefix == "" { childPath = name }
+		flattenEntities(child, depth+1, childPath, tmdbData, decisions, baseURL, result)
+	}
+}
+
+func countFilesRecursive(node *dirNode) (int, int64) {
+	count := len(node.files)
+	var size int64
+	for _, f := range node.files { size += f.Size }
+	for _, child := range node.children {
+		c, s := countFilesRecursive(child)
+		count += c
+		size += s
+	}
+	return count, size
+}
+
+func findDecision(files []duplicate.FileEntry, decisions map[int64]string) string {
+	for _, f := range files {
+		if d, ok := decisions[f.ID]; ok { return d }
+	}
+	return ""
+}
+
+func findDecisionInNode(node *dirNode, decisions map[int64]string) string {
+	for _, f := range node.files {
+		if d, ok := decisions[f.ID]; ok { return d }
+	}
+	for _, child := range node.children {
+		if d := findDecisionInNode(child, decisions); d != "" { return d }
+	}
+	return ""
+}
+
+// isNumberedSeries checks if files in a directory share a common naming pattern.
+// Supports: "剧名 01.mp4", "剧名 05.mp4" (same base) AND "01.mkv", "02.mkv" (bare numbers).
+func isNumberedSeries(files []duplicate.FileEntry) bool {
+	if len(files) < 2 {
+		return false
+	}
+	stripNum := func(name string) string {
+		if idx := strings.LastIndex(name, "."); idx > 0 {
+			e := strings.ToLower(name[idx+1:])
+			switch e {
+			case "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v",
+				"ts", "mts", "m2ts", "mpeg", "mpg", "3gp", "vob":
+				name = name[:idx]
+			}
+		}
+		for len(name) > 0 {
+			last := name[len(name)-1]
+			if last >= '0' && last <= '9' {
+				name = name[:len(name)-1]
+			} else if last == ' ' || last == '-' || last == '_' || last == '.' {
+				name = name[:len(name)-1]
+			} else {
+				break
+			}
+		}
+		return strings.TrimSpace(name)
+	}
+	// Check if ALL files are bare numbers (01.mkv, 02.mkv, etc.)
+	allBareNumbers := true
+	for _, f := range files {
+		if !isBareNumber(f.Name) {
+			allBareNumbers = false
+			break
+		}
+	}
+	if allBareNumbers {
+		return true // All files are numbered → same TV series
+	}
+
+	// Check for shared suffix pattern (episode prefix like "14.枭起青壤...")
+	// Files: "14.枭起青壤.mkv" and "02.枭起青壤.mkv" -> same suffix "枭起青壤.mkv"
+	suffixBase := stripLeadingNum(files[0].Name)
+	if suffixBase != "" {
+		allMatch := true
+		for _, f := range files[1:] {
+			if stripLeadingNum(f.Name) != suffixBase {
+				allMatch = false
+				break
+			}
+		}
+		if allMatch {
+			return true
+		}
+	}
+
+	// Otherwise check for shared prefix (剧名 01.mp4 pattern)
+	base := stripNum(files[0].Name)
+	if base == "" {
+		return false
+	}
+	for _, f := range files[1:] {
+		if stripNum(f.Name) != base {
+			return false
+		}
+	}
+	return true
+}
+
+// stripLeadingNum removes leading episode numbers and separators.
+func stripLeadingNum(name string) string {
+	for len(name) > 0 {
+		first := name[0]
+		if first >= '0' && first <= '9' {
+			name = name[1:]
+		} else if first == ' ' || first == '.' || first == '-' || first == '_' {
+			name = name[1:]
+		} else {
+			break
+		}
+	}
+	if idx := strings.LastIndex(name, "."); idx > 0 {
+		e := strings.ToLower(name[idx+1:])
+		switch e {
+		case "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v",
+			"ts", "mts", "m2ts", "mpeg", "mpg", "3gp", "vob":
+			name = name[:idx]
+		}
+	}
+	return name
+}
+
+// isBareNumber checks if a filename is a bare number (e.g., "01.mkv", "02.mp4").
+func isBareNumber(name string) bool {
+	if idx := strings.LastIndex(name, "."); idx > 0 {
+		name = name[:idx]
+	}
+	if name == "" {
+		return false
+	}
+	for _, c := range name {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+func isSeasonFolderName(name string) bool {
+	if strings.HasPrefix(name, "Season ") { return true }
+	if strings.HasPrefix(name, "S") && len(name) <= 3 { return true }
+	if strings.HasPrefix(name, "第") && strings.HasSuffix(name, "季") { return true }
+	return false
+}
+
+func cleanName(name string) string {
+	info := media.Normalize(name)
+	if info.Title != "" { return info.Title }
+	return name
+}
+func buildOpenListPath(path, baseURL string) string {
+	if baseURL == "" { return "" }
+	baseURL = strings.TrimRight(baseURL, "/")
+	return baseURL + "/" + strings.TrimLeft(path, "/")
+}
+
+func splitPath(path string) []string {
+	cleaned := filepath.Clean(path)
+	parts := strings.Split(cleaned, "/")
+	var result []string
+	for _, p := range parts {
+		if p != "" { result = append(result, p) }
+	}
+	return result
+}
+func summarizeGroup(g duplicate.DuplicateGroup, baseURL string) groupSummary {
+	byStorage := make(map[string]*storageSummary)
+	order := make([]string, 0)
+	var files []dupFileEntry
+	for _, f := range g.Files {
+		s, ok := byStorage[f.Storage]
+		if !ok {
+			order = append(order, f.Storage)
+			byStorage[f.Storage] = &storageSummary{Storage: f.Storage, FileCount: 0, TotalSize: 0}
+			s = byStorage[f.Storage]
+		}
+		s.FileCount++
+		s.TotalSize += f.Size
+		dec := "Unique"
+		if f.Decision == duplicate.Keep { s.IsKeep = true; dec = "Keep"; s.Decision = "Keep" } else if f.Decision == duplicate.Delete { s.IsDelete = true; dec = "Delete"; s.Decision = "Delete" } else { s.Decision = "Unique" }
+		files = append(files, dupFileEntry{Name: f.Name, Path: f.Path, Storage: f.Storage, Size: f.Size, Decision: dec, OpenListURL: buildOpenListPath(f.Path, baseURL)})
+	}
+	sum := groupSummary{Name: g.NormalizedName, EpisodeTag: g.EpisodeTag, IsEpisode: g.IsEpisode}
+	var totalSize, savableSize int64
+	for _, name := range order {
+		s := byStorage[name]
+		sum.Storages = append(sum.Storages, *s)
+		totalSize += s.TotalSize
+		if s.IsDelete { savableSize += s.TotalSize }
+	}
+	sum.TotalSize = totalSize; sum.SavableSize = savableSize
+	sum.Files = files
+	sort.Slice(sum.Storages, func(i, j int) bool {
+		o := map[string]int{"Keep": 0, "Delete": 1, "Unique": 2}
+		oi, oj := o[sum.Storages[i].Decision], o[sum.Storages[j].Decision]
+		if oi != oj { return oi < oj }
+		return sum.Storages[i].Storage < sum.Storages[j].Storage
+	})
+	return sum
+}
+
+func filterDuplicates(groups []duplicate.DuplicateGroup) []duplicate.DuplicateGroup {
+	var result []duplicate.DuplicateGroup
+	for _, g := range groups {
+		hasDelete := false
+		for _, f := range g.Files { if f.Decision == duplicate.Delete { hasDelete = true; break } }
+		if hasDelete { result = append(result, g) }
+	}
+	return result
+}
+
+func Generate(path string, data ReportData) error {
+	if data.GeneratedAt == "" { data.GeneratedAt = time.Now().Format("2006-01-02 15:04:05") }
+	for _, g := range data.MovieGroups { if g.IsEpisode { data.TVGroups = append(data.TVGroups, g) } }
 	var movieOnly []duplicate.DuplicateGroup
-	for _, g := range data.MovieGroups {
-		if !g.IsEpisode {
-			movieOnly = append(movieOnly, g)
+	for _, g := range data.MovieGroups { if !g.IsEpisode { movieOnly = append(movieOnly, g) } }
+	data.MovieGroups = movieOnly
+	data.MovieGroups = filterDuplicates(data.MovieGroups)
+	data.TVGroups = filterDuplicates(data.TVGroups)
+
+	// Build flat show and movie lists from storage trees
+	for _, st := range data.StorageTrees {
+		for _, n := range st.Nodes {
+			if n.IsTVShow {
+				data.Shows = append(data.Shows, ShowEntry{
+					Name: cleanName(n.Name), Path: n.Path,
+					FileCount: n.FileCount, Size: n.Size, Storage: st.Name,
+					DupBadge: n.DupBadge, PosterURL: n.PosterURL, TMDBURL: n.TMDBURL,
+					Rating: n.Rating, OpenListURL: n.OpenListURL,
+TMDBTitle: n.TMDBTitle,				})
+			} else if n.IsMovie {
+				data.Movies = append(data.Movies, MovieEntry{
+					Name: cleanName(n.Name), Path: n.Path,
+					Size: n.Size, Storage: st.Name,
+					DupBadge: n.DupBadge, PosterURL: n.PosterURL, TMDBURL: n.TMDBURL,
+					Rating: n.Rating, OpenListURL: n.OpenListURL,
+TMDBTitle: n.TMDBTitle,				})
+			}
 		}
 	}
-	data.MovieGroups = movieOnly
 
 	tmpl, err := template.New("report").Funcs(template.FuncMap{
-		"formatSize": formatSize,
-		"formatInt":  formatInt,
-		"decisionLabel": func(d duplicate.Decision) string {
-			if d == duplicate.Keep {
-				return "keep"
-			}
-			if d == duplicate.Delete {
-				return "delete"
-			}
+		"formatSize": formatSize, "formatInt": formatInt, "summarize": func(g duplicate.DuplicateGroup) groupSummary { return summarizeGroup(g, data.OpenListBaseURL) },
+		"decisionLabel": func(d string) string {
+			if d == "Keep" || d == "keep" { return "keep" }
+			if d == "Delete" || d == "delete" { return "delete" }
 			return "unique"
 		},
-		"sub": func(a, b int) int { return a - b },
+			"add": func(a, b int) int { return a + b },
 	}).Parse(reportTemplate)
-	if err != nil {
-		return fmt.Errorf("parse template: %w", err)
-	}
-
+	if err != nil { return fmt.Errorf("parse template: %w", err) }
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
-		return fmt.Errorf("execute template: %w", err)
-	}
-
-	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
-		return fmt.Errorf("write report: %w", err)
-	}
-
+	if err := tmpl.Execute(&buf, data); err != nil { return fmt.Errorf("execute template: %w", err) }
+	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil { return fmt.Errorf("write report: %w", err) }
 	return nil
 }
 
-// formatSize converts bytes to a human-readable string.
 func formatSize(bytes int64) string {
-	switch {
-	case bytes >= 1<<30:
-		return fmt.Sprintf("%.2f GB", float64(bytes)/(1<<30))
-	case bytes >= 1<<20:
-		return fmt.Sprintf("%.2f MB", float64(bytes)/(1<<20))
-	case bytes >= 1<<10:
-		return fmt.Sprintf("%.2f KB", float64(bytes)/(1<<10))
-	default:
-		return fmt.Sprintf("%d B", bytes)
-	}
+	switch { case bytes >= 1<<30: return fmt.Sprintf("%.2f GB", float64(bytes)/(1<<30)); case bytes >= 1<<20: return fmt.Sprintf("%.2f MB", float64(bytes)/(1<<20)); case bytes >= 1<<10: return fmt.Sprintf("%.2f KB", float64(bytes)/(1<<10)); default: return fmt.Sprintf("%d B", bytes) }
 }
 
-// formatInt formats an int64 with comma separators.
 func formatInt(n int) string {
-	if n < 1000 {
-		return itoa(n)
-	}
+	if n < 1000 { return itoa(n) }
 	s := ""
-	for n > 0 {
-		if len(s)%4 == 3 {
-			s = "," + s
-		}
-		s = string(rune('0'+n%10)) + s
-		n /= 10
-	}
+	for n > 0 { if len(s)%4 == 3 { s = "," + s }; s = string(rune('0'+n%10)) + s; n /= 10 }
 	return s
 }
 
 func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
+	if n == 0 { return "0" }
 	s := ""
-	for n > 0 {
-		s = string(rune('0'+n%10)) + s
-		n /= 10
-	}
+	for n > 0 { s = string(rune('0'+n%10)) + s; n /= 10 }
 	return s
 }
 
-// CountDuplicateFiles returns the number of files marked as Delete.
-func CountDuplicateFiles(data ReportData) int {
-	return data.Stats.DeleteFiles
+// hasChinese reports whether s contains any Chinese characters (CJK Unified Ideographs).
+func hasChinese(s string) bool {
+	for _, r := range s {
+		if r >= 0x4E00 && r <= 0x9FFF {
+			return true
+		}
+	}
+	return false
+}
+
+// tmdbDisplayTitle returns the TMDB title if it contains Chinese characters,
+// so it can be shown preferentially over the file/directory name.
+// Returns empty string if the title is not Chinese (let the original name be used).
+func tmdbDisplayTitle(t TMDBItem) string {
+	if t.Title != "" && hasChinese(t.Title) {
+		return t.Title
+	}
+	return ""
 }
 
 const reportTemplate = `<!DOCTYPE html>
@@ -131,154 +595,141 @@ const reportTemplate = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OpenList 媒体去重报告</title>
+<title>OpenList 媒体报告</title>
 <style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; color: #333; padding: 20px; }
-.container { max-width: 1200px; margin: 0 auto; }
-h1 { font-size: 24px; margin-bottom: 8px; }
-.header { margin-bottom: 24px; }
-.header .meta { color: #666; font-size: 14px; }
-.card { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); padding: 20px; margin-bottom: 20px; }
-.card h2 { font-size: 18px; margin-bottom: 16px; padding-bottom: 8px; border-bottom: 2px solid #eee; }
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
-.stat-card { text-align: center; padding: 16px; background: #fafafa; border-radius: 6px; }
-.stat-card .value { font-size: 28px; font-weight: 700; color: #2196F3; }
-.stat-card .label { font-size: 13px; color: #666; margin-top: 4px; }
-.stat-card.warn .value { color: #f44336; }
-.stat-card.ok .value { color: #4CAF50; }
-table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee; }
-th { background: #fafafa; font-weight: 600; color: #555; }
-tr:hover { background: #f8f9fa; }
-.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
-.badge-keep { background: #e8f5e9; color: #2e7d32; }
-.badge-delete { background: #ffebee; color: #c62828; }
-.badge-unique { background: #e3f2fd; color: #1565c0; }
-.empty { text-align: center; padding: 40px; color: #999; }
-.bar-container { position: relative; height: 20px; background: #eee; border-radius: 4px; overflow: hidden; min-width: 100px; }
-.bar-fill { height: 100%; background: linear-gradient(90deg, #42a5f5, #2196F3); border-radius: 4px; transition: width 0.3s; }
-.bar-label { position: absolute; top: 50%; left: 8px; transform: translateY(-50%); font-size: 11px; font-weight: 600; color: #333; }
-@media (max-width: 768px) {
-  table { font-size: 12px; }
-  th, td { padding: 6px 8px; }
-  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter','PingFang SC','Microsoft YaHei',sans-serif;background:#0B0B0E;color:#F5F0EB;min-height:100vh;padding:0}
+.container{max-width:960px;margin:0 auto;padding:32px 24px}
+
+/* Accent glow bar */
+.accent-bar{height:3px;background:linear-gradient(90deg,#F5B342 0%,#FCD34D 50%,#F5B342 100%);border-radius:2px;margin-bottom:32px;box-shadow:0 0 20px rgba(245,179,66,.25)}
+
+/* Header */
+.header{padding:0 0 28px}
+.header h1{font-size:28px;font-weight:700;letter-spacing:-.5px;color:#F5F0EB;margin-bottom:6px}
+.header .meta{font-size:13px;color:#7C7C8C;letter-spacing:.2px}
+
+/* Section */
+.section{margin-bottom:28px}
+.section-header{display:flex;align-items:center;gap:12px;margin-bottom:14px;padding:0 4px}
+.section-header-line{flex:1;height:1px;background:linear-gradient(90deg,#2C2C36,transparent)}
+.section-title{font-size:12px;font-weight:600;color:#7C7C8C;text-transform:uppercase;letter-spacing:1.2px;white-space:nowrap}
+
+/* Card */
+.card{background:linear-gradient(180deg,#1A1A22 0%,#14141B 100%);border:1px solid #2C2C36;border-radius:14px;overflow:hidden;position:relative}
+.card::before{content:'';position:absolute;top:0;left:20%;right:20%;height:1px;background:linear-gradient(90deg,transparent,rgba(245,179,66,.15),transparent);pointer-events:none}
+
+/* Stats grid */
+.stats-grid{display:grid;grid-template-columns:repeat(5,1fr)}
+.stat-cell{text-align:center;padding:28px 8px 24px;position:relative;border-right:1px solid #2C2C36}
+.stat-cell:last-child{border-right:none}
+.stat-cell::after{content:'';position:absolute;bottom:0;left:25%;right:25%;height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.05),transparent)}
+.stat-value{font-family:'Space Grotesk',monospace;font-size:32px;font-weight:700;letter-spacing:-1px;color:#F5B342}
+.stat-cell.warn .stat-value{color:#FB7185}
+.stat-cell.ok .stat-value{color:#34D399}
+.stat-label{font-size:10px;color:#6B6B7A;margin-top:6px;text-transform:uppercase;letter-spacing:1.2px;font-weight:600}
+
+/* Storage table */
+.storage-table{width:100%;border-collapse:collapse;font-size:13px}
+.storage-table th{text-align:left;padding:14px 18px;font-weight:600;color:#6B6B7A;font-size:10px;text-transform:uppercase;letter-spacing:1px;background:#0F0F14;border-bottom:1px solid #2C2C36}
+.storage-table td{padding:12px 18px;border-bottom:1px solid #1F1F28;color:#8C8C9A;font-size:13px}
+.storage-table tr:last-child td{border-bottom:none}
+.storage-table td:first-child{font-weight:600;color:#F5F0EB}
+.bar-container{height:6px;background:#2C2C36;border-radius:3px;overflow:hidden;min-width:60px}
+.bar-fill{height:100%;border-radius:3px;transition:width .8s cubic-bezier(.4,0,.2,1)}
+.bar-fill.quark{background:linear-gradient(90deg,#14B8A6,#2DD4BF)}
+.bar-fill.tianyi{background:linear-gradient(90deg,#0EA5E9,#38BDF8)}
+.bar-fill.local{background:linear-gradient(90deg,#A78BFA,#C4B5FD)}
+
+/* Entity rows */
+.entity-row{display:flex;align-items:center;padding:14px 18px;border-bottom:1px solid #1F1F28;text-decoration:none;color:inherit;transition:all .2s ease;cursor:pointer;min-height:60px;gap:14px;position:relative}
+.entity-row:last-child{border-bottom:none}
+.entity-row:hover{background:rgba(245,179,66,.04)}
+.entity-icon{font-size:18px;width:24px;text-align:center;flex-shrink:0;opacity:.6}
+.entity-poster{width:44px;height:66px;border-radius:8px;object-fit:cover;background:#2C2C36;flex-shrink:0;box-shadow:0 4px 16px rgba(0,0,0,.4),0 0 0 1px rgba(255,255,255,.04)}
+.entity-poster-placeholder{width:44px;height:66px;border-radius:8px;background:linear-gradient(135deg,#2C2C36,#1F1F28);display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#6B6B7A;flex-shrink:0;border:1px solid #2C2C36}
+.entity-body{flex:1;min-width:0}
+.entity-title{font-size:15px;font-weight:600;color:#F5F0EB;line-height:1.35;letter-spacing:-.2px}
+.entity-meta{font-size:12px;color:#6B6B7A;margin-top:3px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.entity-rating{font-size:11px;color:#F5B342;margin-top:3px;font-weight:500;letter-spacing:.3px}
+.entity-badge{font-size:10px;padding:3px 12px;border-radius:20px;font-weight:600;flex-shrink:0;letter-spacing:.4px;text-transform:uppercase}
+.entity-badge-keep{background:rgba(16,185,129,.1);color:#34D399;border:1px solid rgba(16,185,129,.2)}
+.entity-badge-delete{background:rgba(239,68,68,.1);color:#FB7185;border:1px solid rgba(239,68,68,.2)}
+.entity-badge-unique{background:rgba(108,108,122,.1);color:#6B6B7A;border:1px solid rgba(108,108,122,.15)}
+.dup-summary{display:flex;gap:8px;flex-shrink:0;align-items:center}
+
+/* Storage tags */
+.storage-tag{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:600;letter-spacing:.2px;text-transform:capitalize}
+.storage-tag::before{content:'';width:5px;height:5px;border-radius:50%;flex-shrink:0}
+.local-tag{background:rgba(167,139,250,.08);color:#C4B5FD;border:1px solid rgba(167,139,250,.15)}
+.local-tag::before{background:#A78BFA}
+.quark-tag{background:rgba(20,184,166,.08);color:#5EEAD4;border:1px solid rgba(20,184,166,.15)}
+.quark-tag::before{background:#14B8A6}
+.tianyi-tag{background:rgba(14,165,233,.08);color:#7DD3FC;border:1px solid rgba(14,165,233,.15)}
+.tianyi-tag::before{background:#0EA5E9}
+
+/* Mobile */
+@media(max-width:640px){
+.stats-grid{grid-template-columns:repeat(3,1fr)}
+.stat-cell:nth-child(4),.stat-cell:nth-child(5){border-top:1px solid #2C2C36}
+.container{padding:20px 14px}
+.entity-row{padding:12px 14px;min-height:52px}
+.entity-poster{width:36px;height:54px}
+.entity-poster-placeholder{width:36px;height:54px}
+.header h1{font-size:24px}
+.entity-title{font-size:14px}
 }
 </style>
 </head>
 <body>
 <div class="container">
+<div class="accent-bar"></div>
+<div class="header"><h1>OpenList</h1><div class="meta">{{.GeneratedAt}} · {{formatInt .Stats.TotalFiles}} 个媒体文件 · 发现 {{formatInt .Stats.DuplicateSets}} 组重复</div></div>
 
-<div class="header">
-<h1>🎬 OpenList 媒体去重报告</h1>
-<div class="meta">生成时间: {{.GeneratedAt}} | 总计: {{formatInt .Stats.TotalFiles}} 个文件</div>
-</div>
+<div class="section"><div class="card"><div class="stats-grid">
+<div class="stat-cell"><div class="stat-value">{{formatInt .Stats.TotalFiles}}</div><div class="stat-label">文件</div></div>
+<div class="stat-cell ok"><div class="stat-value">{{formatInt .Stats.UniqueFiles}}</div><div class="stat-label">唯一</div></div>
+<div class="stat-cell warn"><div class="stat-value">{{formatInt .Stats.DuplicateFiles}}</div><div class="stat-label">重复</div></div>
+<div class="stat-cell warn"><div class="stat-value">{{formatInt .Stats.DuplicateSets}}</div><div class="stat-label">组</div></div>
+<div class="stat-cell ok"><div class="stat-value">{{formatSize .Stats.DuplicateSize}}</div><div class="stat-label">可节省</div></div>
+</div></div></div>
 
+{{if .StorageStats}}<div class="section"><div class="section-header"><div class="section-title">存储分布</div><div class="section-header-line"></div></div>
+<div class="card"><table class="storage-table"><thead><tr><th>存储</th><th>文件</th><th>总大小</th><th>重复</th><th>占比</th></tr></thead><tbody>
+{{range $s := .StorageStats}}<tr><td><span class="storage-tag {{$s.Name}}-tag">{{$s.Name}}</span></td><td>{{formatInt $s.FileCount}}</td><td>{{formatSize $s.TotalSize}}</td><td>{{formatSize $s.DupeSize}}</td><td><div class="bar-container"><div class="bar-fill {{$s.Name}}" style="width:{{printf "%.1f" $s.Percentage}}%"></div></div></td></tr>{{end}}
+</tbody></table></div></div>{{end}}
+
+{{if or .MovieGroups .TVGroups}}<div class="section"><div class="section-header"><div class="section-title">重复摘要</div><div class="section-header-line"></div></div>
 <div class="card">
-<h2>📊 统计概览</h2>
-<div class="stats-grid">
-  <div class="stat-card">
-    <div class="value">{{formatInt .Stats.TotalFiles}}</div>
-    <div class="label">扫描文件</div>
-  </div>
-  <div class="stat-card ok">
-    <div class="value">{{formatInt .Stats.UniqueFiles}}</div>
-    <div class="label">唯一文件</div>
-  </div>
-  <div class="stat-card warn">
-    <div class="value">{{formatInt .Stats.DuplicateFiles}}</div>
-    <div class="label">重复文件</div>
-  </div>
-  <div class="stat-card warn">
-    <div class="value">{{formatInt .Stats.DuplicateSets}}</div>
-    <div class="label">重复组数</div>
-  </div>
-  <div class="stat-card ok">
-    <div class="value">{{formatSize .Stats.DuplicateSize}}</div>
-    <div class="label">可节省空间</div>
-  </div>
-</div>
-</div>
+{{range $g := .MovieGroups}}{{$s := summarize $g}}<div class="entity-row" style="cursor:default;border-bottom:2px solid #2C2C36;background:rgba(245,179,66,.03)"><div class="entity-icon">🎬</div><div class="entity-body"><div class="entity-title">{{$s.Name}}</div><div class="entity-meta">{{len $s.Files}} 个文件 · {{formatSize $s.TotalSize}}</div></div><div class="dup-summary">{{range $st := $s.Storages}}<span class="entity-badge entity-badge-{{decisionLabel $st.Decision}}"><span class="storage-tag {{$st.Storage}}-tag">{{$st.Storage}}</span> {{$st.Decision}}</span>{{end}}</div></div>
+{{range $f := $s.Files}}<a href="{{$f.OpenListURL}}" target="_blank" class="entity-row"><div class="entity-icon">📄</div><div class="entity-body"><div class="entity-title" style="font-size:13px;font-weight:400">{{$f.Name}}</div><div class="entity-meta">{{formatSize $f.Size}} · <span class="storage-tag {{$f.Storage}}-tag">{{$f.Storage}}</span></div></div><span class="entity-badge entity-badge-{{if eq $f.Decision "Keep"}}keep{{else if eq $f.Decision "Delete"}}delete{{else}}unique{{end}}">{{$f.Decision}}</span></a>{{end}}
+{{end}}
+{{range $g := .TVGroups}}{{$s := summarize $g}}<div class="entity-row" style="cursor:default;border-bottom:2px solid #2C2C36;background:rgba(245,179,66,.03)"><div class="entity-icon">📺</div><div class="entity-body"><div class="entity-title">{{$s.Name}}</div><div class="entity-meta">{{len $s.Files}} 个文件 · {{formatSize $s.TotalSize}}</div></div><div class="dup-summary">{{range $st := $s.Storages}}<span class="entity-badge entity-badge-{{decisionLabel $st.Decision}}"><span class="storage-tag {{$st.Storage}}-tag">{{$st.Storage}}</span> {{$st.Decision}}</span>{{end}}</div></div>
+{{range $f := $s.Files}}<a href="{{$f.OpenListURL}}" target="_blank" class="entity-row"><div class="entity-icon">📄</div><div class="entity-body"><div class="entity-title" style="font-size:13px;font-weight:400">{{$f.Name}}</div><div class="entity-meta">{{formatSize $f.Size}} · <span class="storage-tag {{$f.Storage}}-tag">{{$f.Storage}}</span></div></div><span class="entity-badge entity-badge-{{if eq $f.Decision "Keep"}}keep{{else if eq $f.Decision "Delete"}}delete{{else}}unique{{end}}">{{$f.Decision}}</span></a>{{end}}
+{{end}}
+</div></div>{{end}}
 
-{{if .StorageStats}}
+{{if .Shows}}<div class="section"><div class="section-header"><div class="section-title">电视剧 · {{len .Shows}}</div><div class="section-header-line"></div></div>
 <div class="card">
-<h2>💾 存储统计</h2>
-<table>
-<thead>
-<tr><th>存储</th><th>文件数</th><th>总大小</th><th>重复大小</th><th>占比</th></tr>
-</thead>
-<tbody>
-{{range $s := .StorageStats}}
-<tr>
-  <td><strong>{{$s.Name}}</strong></td>
-  <td>{{formatInt $s.FileCount}}</td>
-  <td>{{formatSize $s.TotalSize}}</td>
-  <td>{{formatSize $s.DupeSize}}</td>
-  <td>
-    <div class="bar-container">
-      <div class="bar-fill" style="width: {{printf "%.1f" $s.Percentage}}%"></div>
-      <span class="bar-label">{{printf "%.1f" $s.Percentage}}%</span>
-    </div>
-  </td>
-</tr>
-{{end}}
-</tbody>
-</table>
-</div>
-{{end}}
+{{range .Shows}}<a href="{{.OpenListURL}}" target="_blank" class="entity-row">
+{{if .PosterURL}}<img class="entity-poster" src="{{.PosterURL}}" loading="lazy">{{else}}<div class="entity-poster-placeholder">{{slice .Name 0 1}}</div>{{end}}
+<div class="entity-body"><div class="entity-title">{{if .TMDBTitle}}{{.TMDBTitle}}{{else}}{{.Name}}{{end}}</div>
+<div class="entity-meta">{{.FileCount}} 集 · {{formatSize .Size}} · <span class="storage-tag {{.Storage}}-tag">{{.Storage}}</span></div>
+{{if .Rating}}<div class="entity-rating">{{.Rating}}</div>{{end}}</div>
+{{if .DupBadge}}<span class="entity-badge entity-badge-{{.DupBadge}}">{{.DupBadge}}</span>{{end}}
+</a>{{end}}
+</div></div>{{end}}
 
-{{if .MovieGroups}}
+{{if .Movies}}<div class="section"><div class="section-header"><div class="section-title">电影 · {{len .Movies}}</div><div class="section-header-line"></div></div>
 <div class="card">
-<h2>🎬 重复电影 ({{len .MovieGroups}} 组)</h2>
-{{range $g := .MovieGroups}}
-<h3 style="margin: 16px 0 8px; font-size: 15px;">📁 {{$g.NormalizedName}}</h3>
-<table>
-<thead>
-<tr><th>操作</th><th>存储</th><th>路径</th><th>大小</th></tr>
-</thead>
-<tbody>
-{{range $g.Files}}
-<tr>
-  <td><span class="badge badge-{{decisionLabel .Decision}}">{{.Decision}}</span></td>
-  <td>{{.Storage}}</td>
-  <td><code>{{.Path}}</code></td>
-  <td>{{formatSize .Size}}</td>
-</tr>
-{{end}}
-</tbody>
-</table>
-{{end}}
-</div>
-{{end}}
+{{range .Movies}}<a href="{{.OpenListURL}}" target="_blank" class="entity-row">
+{{if .PosterURL}}<img class="entity-poster" src="{{.PosterURL}}" loading="lazy">{{else}}<div class="entity-poster-placeholder">{{slice .Name 0 1}}</div>{{end}}
+<div class="entity-body"><div class="entity-title">{{if .TMDBTitle}}{{.TMDBTitle}}{{else}}{{.Name}}{{end}}</div>
+<div class="entity-meta">{{formatSize .Size}} · <span class="storage-tag {{.Storage}}-tag">{{.Storage}}</span></div>
+{{if .Rating}}<div class="entity-rating">{{.Rating}}</div>{{end}}</div>
+{{if .DupBadge}}<span class="entity-badge entity-badge-{{.DupBadge}}">{{.DupBadge}}</span>{{end}}
+</a>{{end}}
+</div></div>{{end}}
 
-{{if .TVGroups}}
-<div class="card">
-<h2>📺 重复剧集 ({{len .TVGroups}} 组)</h2>
-{{range $g := .TVGroups}}
-<h3 style="margin: 16px 0 8px; font-size: 15px;">📁 {{$g.NormalizedName}} {{$g.EpisodeTag}}</h3>
-<table>
-<thead>
-<tr><th>操作</th><th>存储</th><th>路径</th><th>大小</th></tr>
-</thead>
-<tbody>
-{{range $g.Files}}
-<tr>
-  <td><span class="badge badge-{{decisionLabel .Decision}}">{{.Decision}}</span></td>
-  <td>{{.Storage}}</td>
-  <td><code>{{.Path}}</code></td>
-  <td>{{formatSize .Size}}</td>
-</tr>
-{{end}}
-</tbody>
-</table>
-{{end}}
-</div>
-{{end}}
-
-{{if not .MovieGroups}}{{if not .TVGroups}}
-<div class="card"><div class="empty">✅ 未发现重复资源</div></div>
-{{end}}{{end}}
-
-</div>
-</body>
-</html>`
+</div></body></html>`

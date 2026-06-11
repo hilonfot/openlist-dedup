@@ -3,12 +3,14 @@ package duplicate
 import (
 	"fmt"
 	"math"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 
 	"openlist/internal/media"
 )
 
-// Decision is the action to take for a duplicate file.
 type Decision string
 
 const (
@@ -17,11 +19,10 @@ const (
 	Unique Decision = "Unique"
 )
 
-// storagePriority defines the priority for keeping files.
-// Lower index = higher priority.
+const folderLevelTag = "__FOLDER__"
+
 var storagePriority = []string{"local", "tianyi", "quark"}
 
-// FileEntry represents a scanned file with its duplicate decision.
 type FileEntry struct {
 	ID       int64
 	Storage  string
@@ -32,7 +33,6 @@ type FileEntry struct {
 	Decision Decision
 }
 
-// DuplicateGroup represents a group of files that are potential duplicates.
 type DuplicateGroup struct {
 	NormalizedName string
 	EpisodeTag     string
@@ -40,47 +40,33 @@ type DuplicateGroup struct {
 	Files          []FileEntry
 }
 
-// Stats holds duplicate detection statistics.
 type Stats struct {
-	TotalFiles    int
-	UniqueFiles   int
-	DuplicateSets int // number of duplicate groups
+	TotalFiles     int
+	UniqueFiles    int
+	DuplicateSets  int
 	DuplicateFiles int
-	DuplicateSize int64 // total wasted space if duplicates are removed
-	KeepFiles     int
-	DeleteFiles   int
+	DuplicateSize  int64
+	KeepFiles      int
+	DeleteFiles    int
 }
 
-// Detector finds duplicate media files using multi-layer detection.
 type Detector struct{}
 
-// New creates a new Detector.
 func New() *Detector {
 	return &Detector{}
 }
 
-// Detect runs duplicate detection on the given file entries.
-// It performs three layers of matching:
-//
-//	Layer 1: Normalized name grouped by media.Normalize()
-//	Layer 2: File size comparison with < 1% tolerance
-//	Layer 3: TMDB ID matching (skipped until Phase 7)
 func (d *Detector) Detect(entries []FileEntry) ([]DuplicateGroup, Stats) {
 	if len(entries) == 0 {
 		return nil, Stats{}
 	}
-
-	// Layer 1: Group by normalized name + episode tag
 	groups := d.groupByNormalizedName(entries)
-
-	// Layer 2: Within each group, verify by file size
 	var result []DuplicateGroup
 	stats := Stats{TotalFiles: len(entries)}
-	seen := make(map[int64]bool) // track unique files
+	seen := make(map[int64]bool)
 
 	for _, g := range groups {
 		if len(g.Files) <= 1 {
-			// Single file — mark as unique
 			if len(g.Files) == 1 {
 				g.Files[0].Decision = Unique
 				stats.UniqueFiles++
@@ -90,11 +76,14 @@ func (d *Detector) Detect(entries []FileEntry) ([]DuplicateGroup, Stats) {
 			continue
 		}
 
-		// Layer 2: Verify by size comparison
-		verified := d.verifyBySize(g.Files)
+		var verified []FileEntry
+		if g.IsEpisode && g.EpisodeTag == folderLevelTag {
+			verified = g.Files
+		} else {
+			verified = d.verifyBySize(g.Files)
+		}
 
 		if len(verified) <= 1 {
-			// Size didn't match — treat all as unique
 			for i := range g.Files {
 				g.Files[i].Decision = Unique
 				stats.UniqueFiles++
@@ -104,8 +93,11 @@ func (d *Detector) Detect(entries []FileEntry) ([]DuplicateGroup, Stats) {
 			continue
 		}
 
-		// Some files matched by size — they form a duplicate group
-		d.assignDecisions(verified)
+		if g.IsEpisode && g.EpisodeTag == folderLevelTag {
+			d.assignFolderDecisions(verified)
+		} else {
+			d.assignDecisions(verified)
+		}
 		dupGroup := DuplicateGroup{
 			NormalizedName: g.NormalizedName,
 			EpisodeTag:     g.EpisodeTag,
@@ -126,7 +118,6 @@ func (d *Detector) Detect(entries []FileEntry) ([]DuplicateGroup, Stats) {
 			}
 		}
 
-		// Non-matched files in the same name group remain as unique
 		var leftover []FileEntry
 		matchedIDs := make(map[int64]bool, len(verified))
 		for _, f := range verified {
@@ -150,37 +141,65 @@ func (d *Detector) Detect(entries []FileEntry) ([]DuplicateGroup, Stats) {
 		}
 	}
 
-	// Count unique files that weren't in any group
 	stats.UniqueFiles = stats.TotalFiles - stats.DuplicateFiles - (len(entries) - len(seen))
-
 	return result, stats
 }
 
 // groupByNormalizedName groups FileEntry slices by their normalized media name.
-// Layer 1: name-based grouping.
+// For TV episodes, grouping is done by the parent folder name instead of individual episode name.
+// Files named as bare numbers (01.mkv, 02.mkv) are also treated as TV episodes.
 func (d *Detector) groupByNormalizedName(entries []FileEntry) []DuplicateGroup {
 	groups := make(map[string]*DuplicateGroup)
-	// Use a stable key: "normalized_name||episode_tag"
 	var keys []string
 
 	for _, entry := range entries {
 		info := media.Normalize(entry.Name)
-		key := info.Title + "||" + info.EpisodeTag
+
+		var key string
+		var normName, epTag string
+		var isEp bool
+
+		if info.IsEpisode {
+			parentFolder := filepath.Base(filepath.Dir(entry.Path))
+			folderName := parentFolder
+			if isSeasonFolder(parentFolder) {
+				folderName = filepath.Base(filepath.Dir(filepath.Dir(entry.Path)))
+			}
+			key = folderName + "||" + folderLevelTag
+			normName = folderName
+			epTag = folderLevelTag
+			isEp = true
+		} else if isBareNumberFile(entry.Name) || hasLeadingEpNumber(entry.Name) {
+			// Bare number files (01.mkv, 02.mkv) → treat as TV episodes
+			parentFolder := filepath.Base(filepath.Dir(entry.Path))
+			folderName := parentFolder
+			if isSeasonFolder(parentFolder) {
+				folderName = filepath.Base(filepath.Dir(filepath.Dir(entry.Path)))
+			}
+			key = folderName + "||" + folderLevelTag
+			normName = folderName
+			epTag = folderLevelTag
+			isEp = true
+		} else {
+			key = info.Title + "||" + info.EpisodeTag
+			normName = info.Title
+			epTag = info.EpisodeTag
+			isEp = info.IsEpisode
+		}
 
 		if g, ok := groups[key]; ok {
 			g.Files = append(g.Files, entry)
 		} else {
 			keys = append(keys, key)
 			groups[key] = &DuplicateGroup{
-				NormalizedName: info.Title,
-				EpisodeTag:     info.EpisodeTag,
-				IsEpisode:      info.IsEpisode,
+				NormalizedName: normName,
+				EpisodeTag:     epTag,
+				IsEpisode:      isEp,
 				Files:          []FileEntry{entry},
 			}
 		}
 	}
 
-	// Convert to slice in insertion order
 	result := make([]DuplicateGroup, 0, len(groups))
 	for _, k := range keys {
 		result = append(result, *groups[k])
@@ -188,14 +207,44 @@ func (d *Detector) groupByNormalizedName(entries []FileEntry) []DuplicateGroup {
 	return result
 }
 
-// verifyBySize filters files that have similar sizes (within 1% tolerance).
-// Returns only files that form at least one size-matching pair.
+// isBareNumberFile checks if a filename is a bare number (e.g., "01.mkv", "02.mp4").
+// hasLeadingEpNumber checks if filename starts with an episode number prefix.
+// Examples: "14.枭起青壤.mkv" -> true, "02.剧名.mp4" -> true
+func hasLeadingEpNumber(name string) bool {
+	if idx := strings.LastIndex(name, "."); idx > 0 {
+		name = name[:idx]
+	}
+	// Check if starts with digits followed by a separator
+	i := 0
+	for i < len(name) && name[i] >= '0' && name[i] <= '9' {
+		i++
+	}
+	if i == 0 || i >= len(name) {
+		return false
+	}
+	// After digits must have a separator
+	return name[i] == '.' || name[i] == ' ' || name[i] == '-' || name[i] == '_'
+}
+
+func isBareNumberFile(name string) bool {
+	if idx := strings.LastIndex(name, "."); idx > 0 {
+		name = name[:idx]
+	}
+	if name == "" {
+		return false
+	}
+	for _, c := range name {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func (d *Detector) verifyBySize(files []FileEntry) []FileEntry {
 	if len(files) < 2 {
 		return files
 	}
-
-	// Build adjacency: files with similar sizes are grouped together
 	matched := make(map[int64]bool)
 	for i := 0; i < len(files); i++ {
 		for j := i + 1; j < len(files); j++ {
@@ -205,7 +254,6 @@ func (d *Detector) verifyBySize(files []FileEntry) []FileEntry {
 			}
 		}
 	}
-
 	var result []FileEntry
 	for _, f := range files {
 		if matched[f.ID] {
@@ -215,7 +263,6 @@ func (d *Detector) verifyBySize(files []FileEntry) []FileEntry {
 	return result
 }
 
-// sizeWithinTolerance checks if two file sizes are within 1% of each other.
 func sizeWithinTolerance(a, b int64) bool {
 	if a == 0 && b == 0 {
 		return true
@@ -228,17 +275,12 @@ func sizeWithinTolerance(a, b int64) bool {
 	return (diff / max) < 0.01
 }
 
-// assignDecisions applies storage priority to a group of confirmed duplicates.
-// The file with the highest priority storage is kept; others are marked for deletion.
 func (d *Detector) assignDecisions(files []FileEntry) {
 	if len(files) == 0 {
 		return
 	}
-
-	// Find the file with the highest storage priority
 	bestIdx := 0
 	bestPriority := storageRank(files[0].Storage)
-
 	for i := 1; i < len(files); i++ {
 		pri := storageRank(files[i].Storage)
 		if pri < bestPriority {
@@ -246,8 +288,6 @@ func (d *Detector) assignDecisions(files []FileEntry) {
 			bestIdx = i
 		}
 	}
-
-	// Mark best as Keep, rest as Delete
 	for i := range files {
 		if i == bestIdx {
 			files[i].Decision = Keep
@@ -257,8 +297,28 @@ func (d *Detector) assignDecisions(files []FileEntry) {
 	}
 }
 
-// storageRank returns the priority rank of a storage type.
-// Lower number = higher priority. Unknown storages get lowest priority.
+func (d *Detector) assignFolderDecisions(files []FileEntry) {
+	if len(files) == 0 {
+		return
+	}
+	bestStorage := files[0].Storage
+	bestPriority := storageRank(files[0].Storage)
+	for _, f := range files[1:] {
+		pri := storageRank(f.Storage)
+		if pri < bestPriority {
+			bestPriority = pri
+			bestStorage = f.Storage
+		}
+	}
+	for i := range files {
+		if files[i].Storage == bestStorage {
+			files[i].Decision = Keep
+		} else {
+			files[i].Decision = Delete
+		}
+	}
+}
+
 func storageRank(storage string) int {
 	for i, s := range storagePriority {
 		if s == storage {
@@ -268,7 +328,21 @@ func storageRank(storage string) int {
 	return len(storagePriority)
 }
 
-// FormatGroupOutput returns a human-readable summary of a duplicate group.
+func isSeasonFolder(name string) bool {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`^[Ss]eason\s+\d+$`),
+		regexp.MustCompile(`^[Ss]\d+$`),
+		regexp.MustCompile(`^第[\d一二三四五六七八九十百千]+季$`),
+		regexp.MustCompile(`^第\s*\d+\s*季$`),
+	}
+	for _, re := range patterns {
+		if re.MatchString(name) {
+			return true
+		}
+	}
+	return false
+}
+
 func FormatGroupOutput(g DuplicateGroup) string {
 	s := fmt.Sprintf("Group: %s", g.NormalizedName)
 	if g.IsEpisode {
@@ -276,7 +350,6 @@ func FormatGroupOutput(g DuplicateGroup) string {
 	}
 	s += fmt.Sprintf(" (%d files)\n", len(g.Files))
 
-	// Sort by decision (Keep first) for cleaner output
 	sorted := make([]FileEntry, len(g.Files))
 	copy(sorted, g.Files)
 	sort.Slice(sorted, func(i, j int) bool {

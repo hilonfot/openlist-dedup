@@ -24,7 +24,7 @@ test:
 	go test ./... -cover -count=1 -timeout 120s
 
 run: build
-	./$(BUILD_DIR)/$(APP_NAME) --scan
+	./$(BUILD_DIR)/$(APP_NAME) --scan --clear-data
 
 run-report: build
 	./$(BUILD_DIR)/$(APP_NAME) --report --report-path report.html

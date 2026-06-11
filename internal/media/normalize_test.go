@@ -557,16 +557,33 @@ func TestNormalize_VariousEpisodeFormats(t *testing.T) {
 	}
 }
 
-// --- 含有年份数字的电影（确保年份不会错误触发剧集检测） ---
+// --- 复杂场景: 音频编码、场景标签、频道数等 ---
 
-func TestNormalize_MovieWithYear(t *testing.T) {
+func TestNormalize_ComplexSceneRelease(t *testing.T) {
 	tests := []struct {
 		input string
 		want  string
 	}{
-		{"1917.2019.1080p.mkv", "1917"},
-		{"2022.2023.BluRay.mkv", "2022"},
-		{"The.Thing.1982.4K.mkv", "The Thing"},
+		// 完整的复杂场景文件名
+		{"The.Amazing.Spider-Man.2012.PROPER.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-老K.mkv", "The Amazing Spider Man"},
+		// DTS 音频
+		{"Movie.2020.1080p.BluRay.DTS.mkv", "Movie"},
+		// TrueHD Atmos
+		{"Movie.2021.4K.REMUX.TrueHD.Atmos.mkv", "Movie"},
+		// PROPER 标签
+		{"Movie.2022.1080p.PROPER.WEB-DL.mkv", "Movie"},
+		// REPACK 标签
+		{"Movie.2023.2160p.REPACK.mkv", "Movie"},
+		// HDR10+
+		{"Movie.2024.4K.HDR10Plus.mkv", "Movie"},
+		// x264 编码
+		{"Movie.2020.1080p.BluRay.x264.AAC.mkv", "Movie"},
+		// 中文质量标签
+		{"Movie.2020.4K.国英双音.特效字幕.mkv", "Movie"},
+		// 内封中字
+		{"Movie.2020.1080p.内封中字.mkv", "Movie"},
+		// 原盘
+		{"Movie.2020.REMUX.原盘.mkv", "Movie"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
@@ -576,6 +593,208 @@ func TestNormalize_MovieWithYear(t *testing.T) {
 			}
 			if got.IsEpisode {
 				t.Errorf("Normalize(%q).IsEpisode = true, want false", tt.input)
+			}
+		})
+	}
+}
+
+// --- 中文合集前缀 ---
+
+func TestNormalize_ChineseCollectionPrefix(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		// "漫威" 前缀
+		{"漫威.超凡蜘蛛侠1.2012.1080p.mkv", "漫威 超凡蜘蛛侠1"},
+		// "DC" 前缀
+		{"DC.蝙蝠侠.2022.2160p.mkv", "DC 蝙蝠侠"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := Normalize(tt.input)
+			if got.Title != tt.want {
+				t.Errorf("Normalize(%q).Title = %q, want %q", tt.input, got.Title, tt.want)
+			}
+		})
+	}
+}
+
+// --- 目录名（无年份，走回退路径） ---
+
+func TestNormalize_DirectoryName(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"漫威 超凡蜘蛛侠1 4K原盘REMUX 国英双音 特效字幕", "漫威 超凡蜘蛛侠1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := Normalize(tt.input)
+			if got.Title != tt.want {
+				t.Errorf("Normalize(%q).Title = %q, want %q", tt.input, got.Title, tt.want)
+			}
+		})
+	}
+}
+
+// --- 年份作为标题（确保回退路径正确处理） ---
+
+func TestNormalize_MovieWithYearOnly(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		// 年份作为标题，无发布年份
+		{"2012.mkv", "2012"},
+		// 年份作为标题+发布年份
+		{"1984.2023.1080p.mkv", "1984"},
+		{"2012.2009.1080p.BluRay.mkv", "2012"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := Normalize(tt.input)
+			if got.Title != tt.want {
+				t.Errorf("Normalize(%q).Title = %q, want %q", tt.input, got.Title, tt.want)
+			}
+			if got.IsEpisode {
+				t.Errorf("Normalize(%q).IsEpisode = true, want false", tt.input)
+			}
+		})
+	}
+}
+
+// --- 发布组剥离 ---
+
+func TestNormalize_ReleaseGroup(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Movie.2020.1080p-FLUX.mkv", "Movie"},
+		{"Movie.1080p-FLUX.mkv", "Movie"},
+		{"Movie.1080p.BluRay-NTb.mkv", "Movie"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := Normalize(tt.input)
+			if got.Title != tt.want {
+				t.Errorf("Normalize(%q).Title = %q, want %q", tt.input, got.Title, tt.want)
+			}
+		})
+	}
+}
+
+// --- 流媒体来源标签 ---
+
+func TestNormalize_StreamingSource(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Movie.2020.1080p.NF.WEB-DL.mkv", "Movie"},
+		{"Movie.2020.1080p.DSNP.WEB-DL.mkv", "Movie"},
+		{"Show.S01E01.1080p.AMZN.WEB-DL.mkv", "Show"},
+		{"Movie.2020.1080p.HMAX.mkv", "Movie"},
+		{"Show.S01E01.ATVP.mkv", "Show"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := Normalize(tt.input)
+			if got.Title != tt.want {
+				t.Errorf("Normalize(%q).Title = %q, want %q", tt.input, got.Title, tt.want)
+			}
+		})
+	}
+}
+
+// --- 新编解码器 ---
+
+func TestNormalize_NewCodecs(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Movie.2020.1080p.AV1.mkv", "Movie"},
+		{"Movie.2020.1080p.VP9.mkv", "Movie"},
+		{"Movie.2020.1080p.XviD.mkv", "Movie"},
+		{"Movie.2020.1080p.DivX.mkv", "Movie"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := Normalize(tt.input)
+			if got.Title != tt.want {
+				t.Errorf("Normalize(%q).Title = %q, want %q", tt.input, got.Title, tt.want)
+			}
+		})
+	}
+}
+
+// --- 中文标签（字幕/音频） ---
+
+func TestNormalize_ChineseMediaTags(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Movie.2020.国语.mkv", "Movie"},
+		{"Movie.2020.粤语.mkv", "Movie"},
+		{"Movie.2020.国配.mkv", "Movie"},
+		{"Movie.2020.双语.mkv", "Movie"},
+		{"Movie.2020.简体.繁体.mkv", "Movie"},
+		{"Movie.2020.CHS.CHT.mkv", "Movie"},
+		{"Movie.2020.外挂字幕.mkv", "Movie"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := Normalize(tt.input)
+			if got.Title != tt.want {
+				t.Errorf("Normalize(%q).Title = %q, want %q", tt.input, got.Title, tt.want)
+			}
+		})
+	}
+}
+
+// --- 新的HDR标签 ---
+
+func TestNormalize_NewHDRTags(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Movie.2020.DoVi.mkv", "Movie"},
+		{"Movie.2020.DolbyVision.mkv", "Movie"},
+		{"Movie.2020.HDR10Plus.mkv", "Movie"},
+		{"Movie.2020.BT2020.mkv", "Movie"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := Normalize(tt.input)
+			if got.Title != tt.want {
+				t.Errorf("Normalize(%q).Title = %q, want %q", tt.input, got.Title, tt.want)
+			}
+		})
+	}
+}
+
+// --- 括号内容清理 ---
+
+func TestNormalize_BracketContent(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"好东西 (2024)好东西 (2024)[剧情 爱情][宋佳 钟楚曦].2160P.内嵌中字.mkv", "好东西"},
+		{"Movie【加长版】.2020.1080p.mkv", "Movie"},
+		{"Movie [Extended Cut].2020.1080p.mkv", "Movie"},
+		{"Movie（2024）.2020.1080p.mkv", "Movie"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := Normalize(tt.input)
+			if got.Title != tt.want {
+				t.Errorf("Normalize(%q).Title = %q, want %q", tt.input, got.Title, tt.want)
 			}
 		})
 	}

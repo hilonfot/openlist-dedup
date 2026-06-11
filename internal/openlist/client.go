@@ -20,10 +20,12 @@ const (
 
 // Client is an HTTP client for the OpenList API.
 type Client struct {
-	baseURL   string
-	password  string
+	baseURL    string
+	username   string
+	password   string
+	token      string
 	httpClient *http.Client
-	retryMax  int
+	retryMax   int
 }
 
 // New creates a new OpenList client.
@@ -43,6 +45,37 @@ func New(baseURL, password string, timeout time.Duration, retryMax int) *Client 
 		},
 		retryMax: retryMax,
 	}
+}
+
+// SetUsername sets the username for login.
+func (c *Client) SetUsername(username string) {
+	c.username = username
+}
+
+// loginResponse is the JSON data from /api/auth/login (inside the "data" field).
+type loginResponse struct {
+	Token string `json:"token"`
+}
+
+// Login authenticates with the OpenList API using username and password,
+// and stores the returned token for subsequent requests.
+func (c *Client) Login(ctx context.Context) error {
+	reqBody := map[string]string{
+		"username": c.username,
+		"password": c.password,
+	}
+
+	var resp loginResponse
+	if err := c.doRequest(ctx, "/api/auth/login", reqBody, &resp); err != nil {
+		return fmt.Errorf("login: %w", err)
+	}
+
+	if resp.Token == "" {
+		return fmt.Errorf("login: empty token in response")
+	}
+
+	c.token = resp.Token
+	return nil
 }
 
 // request sends an authenticated POST request to the given path, retrying on
@@ -89,8 +122,8 @@ func (c *Client) doRequest(ctx context.Context, apiPath string, reqBody, respBod
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if c.password != "" {
-		req.Header.Set("Authorization", c.password)
+	if c.token != "" {
+		req.Header.Set("Authorization", c.token)
 	}
 
 	resp, err := c.httpClient.Do(req)

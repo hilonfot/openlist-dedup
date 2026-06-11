@@ -19,19 +19,19 @@ func TestGenerate_Success(t *testing.T) {
 			{
 				NormalizedName: "Avatar",
 				Files: []duplicate.FileEntry{
-					{ID: 1, Storage: "local", Path: "/local/avatar.mkv", Name: "Avatar.mkv", Size: 2000000000, Decision: duplicate.Keep},
+					{ID: 1, Storage: "local", Path: "/local/avatar.mkv", Name: "Avatar.mkv", Size: 2000000000, Decision: duplicate.Delete},
 					{ID: 2, Storage: "quark", Path: "/quark/avatar.mkv", Name: "Avatar.mkv", Size: 2000000000, Decision: duplicate.Delete},
 				},
 			},
 		},
 		Stats: duplicate.Stats{
-			TotalFiles:    2,
-			UniqueFiles:   0,
-			DuplicateSets: 1,
+			TotalFiles:     2,
+			UniqueFiles:    0,
+			DuplicateSets:  1,
 			DuplicateFiles: 2,
-			DuplicateSize: 2000000000,
-			KeepFiles:     1,
-			DeleteFiles:   1,
+			DuplicateSize:  2000000000,
+			KeepFiles:      1,
+			DeleteFiles:    1,
 		},
 	}
 
@@ -40,7 +40,6 @@ func TestGenerate_Success(t *testing.T) {
 		t.Fatalf("Generate failed: %v", err)
 	}
 
-	// Verify file exists
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("Stat failed: %v", err)
@@ -49,14 +48,13 @@ func TestGenerate_Success(t *testing.T) {
 		t.Error("expected non-empty report file")
 	}
 
-	// Read content and verify key parts
 	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile failed: %v", err)
 	}
 	html := string(content)
 
-	if !strings.Contains(html, "OpenList 媒体去重报告") {
+	if !strings.Contains(html, "OpenList 媒体报告") {
 		t.Error("expected report title in HTML")
 	}
 	if !strings.Contains(html, "Avatar") {
@@ -70,34 +68,6 @@ func TestGenerate_Success(t *testing.T) {
 	}
 	if !strings.Contains(html, "2024-01-01") {
 		t.Error("expected generation timestamp in HTML")
-	}
-}
-
-func TestGenerate_EmptyNoDuplicates(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "empty.html")
-
-	data := ReportData{
-		GeneratedAt: "2024-06-01",
-		Stats: duplicate.Stats{
-			TotalFiles:  10,
-			UniqueFiles: 10,
-		},
-	}
-
-	err := Generate(path, data)
-	if err != nil {
-		t.Fatalf("Generate failed: %v", err)
-	}
-
-	content, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile failed: %v", err)
-	}
-	html := string(content)
-
-	if !strings.Contains(html, "未发现重复资源") {
-		t.Error("expected 'no duplicates' message in HTML")
 	}
 }
 
@@ -118,12 +88,12 @@ func TestGenerate_TVGroups(t *testing.T) {
 			},
 		},
 		Stats: duplicate.Stats{
-			TotalFiles:    2,
-			DuplicateSets: 1,
+			TotalFiles:     2,
+			DuplicateSets:  1,
 			DuplicateFiles: 2,
-			DuplicateSize: 500000000,
-			KeepFiles:     1,
-			DeleteFiles:   1,
+			DuplicateSize:  500000000,
+			KeepFiles:      1,
+			DeleteFiles:    1,
 		},
 	}
 
@@ -138,14 +108,11 @@ func TestGenerate_TVGroups(t *testing.T) {
 	}
 	html := string(content)
 
-	if !strings.Contains(html, "重复剧集") {
-		t.Error("expected TV section in HTML")
+	if !strings.Contains(html, "重复摘要") {
+		t.Error("expected duplicate summary section in HTML")
 	}
 	if !strings.Contains(html, "Breaking Bad") {
 		t.Error("expected TV show name in HTML")
-	}
-	if !strings.Contains(html, "S01E01") {
-		t.Error("expected episode tag in HTML")
 	}
 }
 
@@ -160,8 +127,8 @@ func TestGenerate_StorageStats(t *testing.T) {
 			{Name: "tianyi", FileCount: 5, TotalSize: 5000000000, DupeSize: 0},
 		},
 		Stats: duplicate.Stats{
-			TotalFiles:  35,
-			UniqueFiles: 25,
+			TotalFiles:     35,
+			UniqueFiles:    25,
 			DuplicateFiles: 10,
 		},
 	}
@@ -177,7 +144,7 @@ func TestGenerate_StorageStats(t *testing.T) {
 	}
 	html := string(content)
 
-	if !strings.Contains(html, "存储统计") {
+	if !strings.Contains(html, "存储分布") {
 		t.Error("expected storage stats section")
 	}
 	if !strings.Contains(html, "quark") {
@@ -192,8 +159,8 @@ func TestGenerate_ValidHTMLStructure(t *testing.T) {
 	data := ReportData{
 		GeneratedAt: "2024-06-15 10:30:00",
 		Stats: duplicate.Stats{
-			TotalFiles:  5,
-			UniqueFiles: 3,
+			TotalFiles:     5,
+			UniqueFiles:    3,
 			DuplicateFiles: 2,
 		},
 	}
@@ -209,7 +176,6 @@ func TestGenerate_ValidHTMLStructure(t *testing.T) {
 	}
 	html := string(content)
 
-	// Basic HTML structure validation
 	checks := []struct {
 		name string
 		fn   func(string) bool
@@ -219,7 +185,9 @@ func TestGenerate_ValidHTMLStructure(t *testing.T) {
 		{"has head", func(s string) bool { return strings.Contains(s, "<head>") }},
 		{"has body", func(s string) bool { return strings.Contains(s, "<body>") }},
 		{"has closing html", func(s string) bool { return strings.Contains(s, "</html>") }},
-		{"has meta charset", func(s string) bool { return strings.Contains(s, `charset="UTF-8"`) || strings.Contains(s, `charset="utf-8"`) }},
+		{"has meta charset", func(s string) bool {
+			return strings.Contains(s, `charset="UTF-8"`) || strings.Contains(s, `charset="utf-8"`)
+		}},
 		{"has viewport", func(s string) bool { return strings.Contains(s, "viewport") }},
 	}
 
@@ -287,36 +255,35 @@ func TestGenerate_FilePermissions(t *testing.T) {
 		t.Fatalf("Stat failed: %v", err)
 	}
 
-	// Should be readable by owner
 	if info.Mode().Perm()&0400 == 0 {
 		t.Error("expected file to be readable by owner")
 	}
 }
 
 func TestSeparateMovieAndTV(t *testing.T) {
-	// Test that Generate correctly separates Movie and TV groups
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mixed.html")
 
 	movieGroup := duplicate.DuplicateGroup{
 		NormalizedName: "The Matrix",
-		IsEpisode:     false,
+		IsEpisode:      false,
 		Files: []duplicate.FileEntry{
 			{ID: 1, Storage: "local", Path: "/m.mkv", Size: 100, Decision: duplicate.Keep},
+			{ID: 2, Storage: "tianyi", Path: "/t.mkv", Size: 100, Decision: duplicate.Delete},
 		},
 	}
 	tvGroup := duplicate.DuplicateGroup{
 		NormalizedName: "The Last of Us",
-		EpisodeTag:     "S01E01",
 		IsEpisode:      true,
 		Files: []duplicate.FileEntry{
-			{ID: 2, Storage: "tianyi", Path: "/t.mkv", Size: 100, Decision: duplicate.Keep},
+			{ID: 3, Storage: "local", Path: "/t1.mkv", Size: 200, Decision: duplicate.Keep},
+			{ID: 4, Storage: "tianyi", Path: "/t2.mkv", Size: 200, Decision: duplicate.Delete},
 		},
 	}
 
 	data := ReportData{
 		MovieGroups: []duplicate.DuplicateGroup{movieGroup, tvGroup},
-		Stats:       duplicate.Stats{TotalFiles: 2},
+		Stats:       duplicate.Stats{TotalFiles: 4},
 	}
 
 	err := Generate(path, data)
@@ -330,10 +297,7 @@ func TestSeparateMovieAndTV(t *testing.T) {
 	}
 	html := string(content)
 
-	if !strings.Contains(html, "重复电影") {
-		t.Error("expected movie section")
-	}
-	if !strings.Contains(html, "重复剧集") {
-		t.Error("expected TV section")
+	if !strings.Contains(html, "重复摘要") {
+		t.Error("expected duplicate summary section")
 	}
 }

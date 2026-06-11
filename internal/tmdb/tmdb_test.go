@@ -308,9 +308,20 @@ func TestSearchMovie_CacheMissThenFill(t *testing.T) {
 func TestSearchMovie_ChineseFallback(t *testing.T) {
 	// Simulate Chinese not available, English works
 	langCalls := []string{}
+	callPaths := []string{}
 	mock := newMockTMDB(t, func(w http.ResponseWriter, r *http.Request) {
+		callPaths = append(callPaths, r.URL.Path)
 		lang := r.URL.Query().Get("language")
 		langCalls = append(langCalls, lang)
+
+		if strings.HasPrefix(r.URL.Path, "/movie/") && !strings.HasPrefix(r.URL.Path, "/search/") {
+			// Details endpoint: return Chinese title
+			json.NewEncoder(w).Encode(movieDetails{
+				ID: 550, Title: "搏击俱乐部", Overview: "An insomniac...",
+			})
+			return
+		}
+
 		if strings.Contains(lang, "zh") {
 			json.NewEncoder(w).Encode(searchResponse{Results: []SearchResult{}})
 			return
@@ -331,8 +342,12 @@ func TestSearchMovie_ChineseFallback(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
-	if len(langCalls) != 2 {
-		t.Errorf("expected 2 language attempts, got %d: %v", len(langCalls), langCalls)
+	if len(langCalls) != 3 {
+		t.Errorf("expected 3 API calls (zh-CN search + en-US search + zh-CN details), got %d: %v", len(langCalls), langCalls)
+	}
+	// Title should be Chinese from details endpoint, not English
+	if result.Title != "搏击俱乐部" {
+		t.Errorf("expected Chinese title '搏击俱乐部', got %q", result.Title)
 	}
 }
 

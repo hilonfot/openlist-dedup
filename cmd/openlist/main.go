@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -14,6 +15,8 @@ import (
 	"openlist/internal/openlist"
 	"openlist/internal/report"
 	"openlist/internal/repository"
+	"openlist/internal/scanner"
+	"openlist/internal/tmdb"
 )
 
 func main() {
@@ -29,6 +32,7 @@ func run() int {
 	applyCleanup := hasFlag("--apply")
 	dbOverride := flag("--db", "")
 	workers := flagInt("--workers", 32)
+	clearData := hasFlag("--clear-data")
 
 	// Load config
 	cfg, err := config.Load(cfgPath)
@@ -69,6 +73,17 @@ func run() int {
 	}
 	defer db.Close()
 
+	// Clear scan data but preserve TMDB cache
+	if clearData {
+		log.Info("Clearing scan data, preserving TMDB cache")
+		if _, err := db.Exec("DELETE FROM media_files"); err != nil {
+			log.Error("Failed to clear media_files", "error", err)
+		}
+		if _, err := db.Exec("DELETE FROM scan_tasks"); err != nil {
+			log.Error("Failed to clear scan_tasks", "error", err)
+		}
+	}
+
 	ctx := context.Background()
 
 	// OpenList client
@@ -78,6 +93,9 @@ func run() int {
 		time.Duration(cfg.OpenList.Timeout)*time.Second,
 		cfg.OpenList.RetryMax,
 	)
+	if cfg.OpenList.Username != "" {
+		olClient.SetUsername(cfg.OpenList.Username)
+	}
 
 	if modeScan {
 		log.Info("Starting scan",
@@ -87,37 +105,108 @@ func run() int {
 		)
 
 		// Build seed tasks from configured paths
-		var seeds []struct {
-			storage string
-			paths   []string
+		var seeds []scanner.ScanTask
+		for _, p := range cfg.Storage.LocalPaths {
+			seeds = append(seeds, scanner.ScanTask{Storage: scanner.StorageLocal, Path: p})
 		}
-		if len(cfg.Storage.LocalPaths) > 0 {
-			seeds = append(seeds, struct {
-				storage string
-				paths   []string
-			}{"local", cfg.Storage.LocalPaths})
+		for _, p := range cfg.Storage.QuarkPaths {
+			seeds = append(seeds, scanner.ScanTask{Storage: scanner.StorageQuark, Path: p})
 		}
-		if len(cfg.Storage.QuarkPaths) > 0 {
-			seeds = append(seeds, struct {
-				storage string
-				paths   []string
-			}{"quark", cfg.Storage.QuarkPaths})
-		}
-		if len(cfg.Storage.TianyiPaths) > 0 {
-			seeds = append(seeds, struct {
-				storage string
-				paths   []string
-			}{"tianyi", cfg.Storage.TianyiPaths})
+		for _, p := range cfg.Storage.TianyiPaths {
+			seeds = append(seeds, scanner.ScanTask{Storage: scanner.StorageTianyi, Path: p})
 		}
 
 		if len(seeds) == 0 {
 			log.Warn("No scan paths configured, skipping scan")
 		} else {
-			// TODO: Phase 10 does not require a full scan integration.
-			// The scanner package framework is ready for integration.
-			log.Info("Scanner is initialized", "seed_storages", len(seeds))
-			_ = olClient
-			_ = seeds
+			log.Info("Starting scanner", "seed_count", len(seeds))
+
+			// Login to OpenList API (only if username is configured)
+			if cfg.OpenList.Username != "" {
+				if err := olClient.Login(ctx); err != nil {
+					log.Error("Failed to login to OpenList", "error", err)
+					return 1
+				}
+				log.Info("Login successful", "url", cfg.OpenList.URL)
+			} else {
+				log.Info("No username configured, using password-based auth")
+			}
+
+			// Create scanner
+			s := scanner.New(scanner.Config{
+				Client:    olClient,
+				Workers:   cfg.Scanner.Workers,
+				QueueSize: cfg.Scanner.QueueSize,
+			})
+
+			// Create batch inserter for writing results to database
+			inserter := repository.NewBatchInserter(db)
+			inserter.OnFlush(func(count int) {
+				log.Debug("Batch flushed", "count", count)
+			})
+
+			// Start periodic flush loop (flushes every 5s if buffer not empty)
+			flushCtx, flushCancel := context.WithCancel(ctx)
+			defer flushCancel()
+			inserter.FlushLoop(flushCtx)
+
+			// Start BFS scanning (non-blocking)
+			s.Start(ctx, seeds)
+
+			// Consume scan results in background
+			consumeDone := make(chan struct{})
+			var scannedFiles int64
+			var loggedCount int64
+			go func() {
+				defer close(consumeDone)
+				for result := range s.Results() {
+					if err := inserter.Insert(ctx, repository.MediaRow{
+						Storage:  string(result.Storage),
+						Path:     result.Path,
+						Name:     result.Name,
+						Size:     result.Size,
+						IsDir:    result.IsDir,
+						Modified: result.Modified,
+					}); err != nil {
+						log.Error("Failed to insert scan result", "path", result.Path, "error", err)
+					}
+					scannedFiles++
+					// Log progress every 50 files so user can see data flowing
+					if scannedFiles%50 == 0 {
+						log.Info("Scan progress",
+							"files_scanned", scannedFiles,
+							"last_file", result.Path,
+						)
+					}
+					if loggedCount < 5 && scannedFiles <= 5 {
+						log.Info("Scanned file",
+							"storage", result.Storage,
+							"path", result.Path,
+							"name", result.Name,
+							"size", result.Size,
+						)
+						loggedCount++
+					}
+				}
+			}()
+
+			// Wait for scanner to finish (all workers done)
+			s.Wait()
+			// Wait for consumer to drain the channel
+			<-consumeDone
+
+			// Final flush of any remaining buffered rows
+			if err := inserter.Flush(ctx); err != nil {
+				log.Error("Failed to flush remaining buffer", "error", err)
+			}
+
+			stats := s.Stats()
+			log.Info("Scan completed",
+				"directories", stats.Directories,
+				"files", stats.Files,
+				"elapsed", stats.Elapsed.String(),
+				"inserted", scannedFiles,
+			)
 		}
 	}
 
@@ -169,11 +258,67 @@ func run() int {
 			"saved_space", fmt.Sprintf("%d bytes", stats.DuplicateSize),
 		)
 
+			// Look up TMDB poster and metadata for each duplicate group
+			tmdbData := make(map[string]report.TMDBItem)
+			if cfg.TMDB.APIKey != "" {
+				tmdbClient := tmdb.New(tmdb.Config{
+					APIKey:      cfg.TMDB.APIKey,
+					BaseURL:     cfg.TMDB.BaseURL,
+					ImageBaseURL: cfg.TMDB.ImageBaseURL,
+					Cache:       db,
+					CacheTTL:    time.Duration(cfg.TMDB.CacheTTL) * time.Second,
+					RateLimit:   cfg.TMDB.RateLimit,
+				})
+				// Quick connectivity check for TMDB
+				if !tmdbCheckReachable(ctx, cfg.TMDB.BaseURL) {
+					log.Warn("TMDB API is not reachable (network blocked), skipping poster lookup")
+				} else {
+				for _, g := range groups {
+					name := g.NormalizedName
+					if _, ok := tmdbData[name]; ok {
+						continue
+					}
+					if g.IsEpisode {
+						if result, err := tmdbClient.SearchTV(ctx, name, 0, 0); err == nil && result != nil {
+							if err != nil {
+								log.Warn("TMDB TV search failed", "name", name, "error", err)
+							}
+								log.Debug("TMDB: TV lookup", "name", name, "found", result != nil)
+							tmdbData[name] = report.TMDBItem{
+								PosterURL: result.PosterURL,
+								Overview:  result.Overview,
+								Rating:    result.VoteAverage,
+								TMDBURL:   result.TMDBURL,
+									Title:     result.Name,
+							}
+						}
+					} else {
+						if result, err := tmdbClient.SearchMovie(ctx, name, 0); err == nil && result != nil {
+							if err != nil {
+								log.Warn("TMDB Movie search failed", "name", name, "error", err)
+							}
+								log.Debug("TMDB: Movie lookup", "name", name, "found", result != nil)
+							tmdbData[name] = report.TMDBItem{
+								PosterURL: result.PosterURL,
+								Overview:  result.Overview,
+								Rating:    result.VoteAverage,
+								TMDBURL:   result.TMDBURL,
+									Title:     result.Title,
+							}
+						}
+					}
+				}
+			}
+				}
+
 		if modeReport {
 			reportData := report.ReportData{
 				GeneratedAt: time.Now().Format("2006-01-02 15:04:05"),
 				MovieGroups: groups,
 				Stats:       stats,
+				TMDBData:    tmdbData,
+				StorageTrees:    report.BuildFileTree(entries, tmdbData, groups, cfg.OpenList.URL),
+				OpenListBaseURL: cfg.OpenList.URL,
 			}
 			reportPath := flag("--report-path", "report.html")
 			if err := report.Generate(reportPath, reportData); err != nil {
@@ -220,6 +365,19 @@ func run() int {
 	return 0
 }
 
+// tmdbCheckReachable tests if TMDB API is accessible.
+func tmdbCheckReachable(ctx context.Context, baseURL string) bool {
+	if baseURL == "" {
+		baseURL = "https://tmdb-proxy.hilon2019.workers.dev"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/3/configuration?api_key=test", nil)
+	if err != nil { return false }
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { return false }
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusOK
+}
+
 // flag returns the value after the given flag, or defaultValue if not found.
 func flag(name, defaultValue string) string {
 	args := os.Args[1:]
@@ -261,4 +419,3 @@ func flagInt(name string, defaultValue int) int {
 	}
 	return defaultValue
 }
-

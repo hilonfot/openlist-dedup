@@ -1,6 +1,7 @@
 openlist:
-  url: "http://localhost:5244"
-  password: ""
+  url: "http://192.168.123.7:5255"
+  username: "admin"
+  password: "admin"
   timeout: 30
   retry_max: 3
 
@@ -13,6 +14,9 @@ database:
 
 tmdb:
   api_key: ""
+  # 代理地址
+  base_url: ""
+  image_base_url: ""
   cache_ttl: 86400
   rate_limit: 40
 
@@ -22,9 +26,10 @@ log:
 
 storage:
   local_paths:
-    - "/本地存储/电影"
-    - "/本地存储/电视剧"
+    - "/xunlei"
   quark_paths:
-    - "/夸克网盘/电影"
+    - "/夸克网盘2/来自：分享/高评分电视剧"
+    - "/夸克网盘2/来自：分享/电影"
+    - "/夸克网盘2/来自：分享/电视剧"
   tianyi_paths:
-    - "/天翼云盘/电影"
+    - "/天翼云盘"

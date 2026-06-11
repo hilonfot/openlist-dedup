@@ -361,6 +361,17 @@ func TestAuthHeader(t *testing.T) {
 	var authHeader string
 	mock := newMockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		authHeader = r.Header.Get("Authorization")
+
+		if r.URL.Path == "/api/auth/login" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"code": 200,
+				"data": map[string]interface{}{
+					"token": "test-token",
+				},
+			})
+			return
+		}
+
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 200,
 			"data": map[string]interface{}{
@@ -372,12 +383,23 @@ func TestAuthHeader(t *testing.T) {
 	defer mock.Close()
 
 	client := New(mock.URL(), "my-token", 0, 0)
+	client.SetUsername("admin")
+	if err := client.Login(context.Background()); err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+	// Login request should NOT send a Bearer token (before auth)
+	if authHeader != "" {
+		t.Errorf("expected no Authorization header on login, got '%s'", authHeader)
+	}
+
+	// Reset and test a List call uses the token obtained from login
+	authHeader = ""
 	_, err := client.List(context.Background(), "/movies")
 	if err != nil {
 		t.Fatalf("List failed: %v", err)
 	}
-	if authHeader != "my-token" {
-		t.Errorf("expected Authorization header 'my-token', got '%s'", authHeader)
+	if authHeader != "test-token" {
+		t.Errorf("expected Authorization header 'test-token' for list, got '%s'", authHeader)
 	}
 }
 
