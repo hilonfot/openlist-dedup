@@ -8,12 +8,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"openlist/internal/repository"
 )
 
-	var (
+var (
 	defaultRateLimit = 40 // requests per 10 seconds
 	defaultCacheTTL  = 24 * time.Hour
 	requestTimeout   = 10 * time.Second
@@ -50,12 +51,16 @@ func New(cfg Config) *Client {
 		rateLimit = defaultRateLimit
 	}
 
+	// Strip trailing slash from base URLs to avoid double-slash in paths
+	baseURL := strings.TrimRight(cfg.BaseURL, "/")
+	imageBaseURL := strings.TrimRight(cfg.ImageBaseURL, "/")
+
 	interval := (10 * time.Second) / time.Duration(rateLimit)
 
 	return &Client{
 		apiKey:      cfg.APIKey,
-		baseURL:     cfg.BaseURL,
-		imageBaseURL: cfg.ImageBaseURL,
+		baseURL:     baseURL,
+		imageBaseURL: imageBaseURL,
 		httpClient: &http.Client{
 			Timeout: requestTimeout,
 		},
@@ -84,16 +89,18 @@ type searchResponse struct {
 
 // movieDetails is the TMDB movie detail API response (only fields we need).
 type movieDetails struct {
-	ID       int64  `json:"id"`
-	Title    string `json:"title"`
-	Overview string `json:"overview"`
+	ID         int64  `json:"id"`
+	Title      string `json:"title"`
+	Overview   string `json:"overview"`
+	PosterPath string `json:"poster_path"`
 }
 
 // tvDetails is the TMDB TV detail API response (only fields we need).
 type tvDetails struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	Overview string `json:"overview"`
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Overview   string `json:"overview"`
+	PosterPath string `json:"poster_path"`
 }
 
 // MovieResult holds the matched movie information.
@@ -142,7 +149,7 @@ func (c *Client) SearchMovie(ctx context.Context, name string, year int) (*Movie
 		return nil, err
 	}
 	if result != nil {
-				c.saveToCache(ctx, name, "movie", result.TMDBID, result)
+		c.saveToCache(ctx, cacheKey(name, year), "movie", result.TMDBID, result)
 		return result, nil
 	}
 
@@ -152,7 +159,7 @@ func (c *Client) SearchMovie(ctx context.Context, name string, year int) (*Movie
 	}
 
 	if result != nil {
-		// Try to get Chinese title/overview for better display
+		// Try to get Chinese title/overview/poster for better display
 		if details, err := c.fetchMovieDetails(ctx, result.TMDBID, "zh-CN"); err == nil {
 			if details.Title != "" {
 				result.Title = details.Title
@@ -160,8 +167,12 @@ func (c *Client) SearchMovie(ctx context.Context, name string, year int) (*Movie
 			if details.Overview != "" {
 				result.Overview = details.Overview
 			}
+			if details.PosterPath != "" {
+				result.PosterPath = details.PosterPath
+				result.PosterURL = c.posterURL(details.PosterPath)
+			}
 		}
-		c.saveToCache(ctx, name, "movie", result.TMDBID, result)
+		c.saveToCache(ctx, cacheKey(name, year), "movie", result.TMDBID, result)
 	}
 
 	return result, nil
@@ -186,7 +197,7 @@ func (c *Client) SearchTV(ctx context.Context, name string, season int, year int
 		return nil, err
 	}
 	if result != nil {
-			c.saveToCache(ctx, name, "tv", result.TMDBID, result)
+		c.saveToCache(ctx, cacheKey(name, year), "tv", result.TMDBID, result)
 		return result, nil
 	}
 
@@ -196,7 +207,7 @@ func (c *Client) SearchTV(ctx context.Context, name string, season int, year int
 	}
 
 	if result != nil {
-		// Try to get Chinese name/overview for better display
+		// Try to get Chinese name/overview/poster for better display
 		if details, err := c.fetchTVDetails(ctx, result.TMDBID, "zh-CN"); err == nil {
 			if details.Name != "" {
 				result.Name = details.Name
@@ -204,8 +215,12 @@ func (c *Client) SearchTV(ctx context.Context, name string, season int, year int
 			if details.Overview != "" {
 				result.Overview = details.Overview
 			}
+			if details.PosterPath != "" {
+				result.PosterPath = details.PosterPath
+				result.PosterURL = c.posterURL(details.PosterPath)
+			}
 		}
-		c.saveToCache(ctx, name, "tv", result.TMDBID, result)
+		c.saveToCache(ctx, cacheKey(name, year), "tv", result.TMDBID, result)
 	}
 
 	return result, nil
@@ -362,17 +377,26 @@ func (c *Client) fetchTVDetails(ctx context.Context, id int64, language string) 
 func (c *Client) bestMovieMatch(results []SearchResult, query string, year int) *MovieResult {
 	queryLower := toLower(query)
 
-	// First pass: exact title match with year
+	// Pass 1: Exact title match — highest confidence, return immediately
 	for _, r := range results {
-		titleLower := toLower(r.Title)
-		if titleLower == queryLower || similar(titleLower, queryLower) {
-			if year > 0 && extractYear(r.ReleaseDate) == year {
-				return c.movieFromResult(r)
+		if toLower(r.Title) == queryLower {
+			return c.movieFromResult(r)
+		}
+	}
+
+	// Pass 2: Exact match plus year filter (when year is known)
+	if year > 0 {
+		for _, r := range results {
+			if extractYear(r.ReleaseDate) == year {
+				titleLower := toLower(r.Title)
+				if titleLower == queryLower || similar(titleLower, queryLower) {
+					return c.movieFromResult(r)
+				}
 			}
 		}
 	}
 
-	// Second pass: year match only
+	// Pass 3: Year match only (any title with matching year)
 	if year > 0 {
 		for _, r := range results {
 			if extractYear(r.ReleaseDate) == year {
@@ -381,15 +405,25 @@ func (c *Client) bestMovieMatch(results []SearchResult, query string, year int) 
 		}
 	}
 
-	// Third pass: take the best scored result
+	// Pass 4: Contains match with highest score
+	var best *SearchResult
+	for i := range results {
+		titleLower := toLower(results[i].Title)
+		if contains(titleLower, queryLower) || contains(queryLower, titleLower) {
+			if best == nil || results[i].VoteAverage > best.VoteAverage {
+				best = &results[i]
+			}
+		}
+	}
+	if best != nil {
+		return c.movieFromResult(*best)
+	}
+
+	// Pass 5: Desperate — return highest scored result
 	if len(results) > 0 {
 		best := results[0]
 		for _, r := range results[1:] {
-			titleLower := toLower(r.Title)
-			if titleLower == queryLower {
-				return c.movieFromResult(r)
-			}
-			if r.VoteAverage > best.VoteAverage && contains(titleLower, queryLower) {
+			if r.VoteAverage > best.VoteAverage {
 				best = r
 			}
 		}
@@ -403,15 +437,26 @@ func (c *Client) bestMovieMatch(results []SearchResult, query string, year int) 
 func (c *Client) bestTVMatch(results []SearchResult, query string, season int, year int) *TVResult {
 	queryLower := toLower(query)
 
+	// Pass 1: Exact name match — highest confidence
 	for _, r := range results {
-		nameLower := toLower(r.Name)
-		if nameLower == queryLower || similar(nameLower, queryLower) {
-			if year > 0 && extractYear(r.FirstAirDate) == year {
-				return c.tvFromResult(r)
+		if toLower(r.Name) == queryLower {
+			return c.tvFromResult(r)
+		}
+	}
+
+	// Pass 2: Exact/similar match with year filter
+	if year > 0 {
+		for _, r := range results {
+			if extractYear(r.FirstAirDate) == year {
+				nameLower := toLower(r.Name)
+				if nameLower == queryLower || similar(nameLower, queryLower) {
+					return c.tvFromResult(r)
+				}
 			}
 		}
 	}
 
+	// Pass 3: Year match only
 	if year > 0 {
 		for _, r := range results {
 			if extractYear(r.FirstAirDate) == year {
@@ -420,13 +465,24 @@ func (c *Client) bestTVMatch(results []SearchResult, query string, season int, y
 		}
 	}
 
+	// Pass 4: Contains match with highest score
+	var best *SearchResult
+	for i := range results {
+		nameLower := toLower(results[i].Name)
+		if contains(nameLower, queryLower) || contains(queryLower, nameLower) {
+			if best == nil || results[i].VoteAverage > best.VoteAverage {
+				best = &results[i]
+			}
+		}
+	}
+	if best != nil {
+		return c.tvFromResult(*best)
+	}
+
+	// Pass 5: Highest scored result
 	if len(results) > 0 {
 		best := results[0]
 		for _, r := range results[1:] {
-			nameLower := toLower(r.Name)
-			if nameLower == queryLower {
-				return c.tvFromResult(r)
-			}
 			if r.VoteAverage > best.VoteAverage {
 				best = r
 			}

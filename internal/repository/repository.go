@@ -41,11 +41,12 @@ CREATE INDEX IF NOT EXISTS idx_scan_tasks_status ON scan_tasks(status);
 	schemaTMDBCache = `
 CREATE TABLE IF NOT EXISTS tmdb_cache (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    normalized_name TEXT    NOT NULL UNIQUE,
+    normalized_name TEXT    NOT NULL,
     tmdb_id         INTEGER NOT NULL DEFAULT 0,
     media_type      TEXT    NOT NULL DEFAULT '',
     data            TEXT    NOT NULL DEFAULT '{}',
-    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+    updated_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(normalized_name, media_type)
 );
 CREATE INDEX IF NOT EXISTS idx_tmdb_cache_media_type ON tmdb_cache(media_type);
 `

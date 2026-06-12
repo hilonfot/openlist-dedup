@@ -1,6 +1,7 @@
 package duplicate
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -171,7 +172,7 @@ func TestDetect_DuplicateEpisode(t *testing.T) {
 	if !groups[0].IsEpisode {
 		t.Errorf("expected IsEpisode true")
 	}
-	if groups[0].EpisodeTag != folderLevelTag {
+	if groups[0].EpisodeTag != "S01E01" {
 		t.Errorf("expected EpisodeTag S01E01, got %s", groups[0].EpisodeTag)
 	}
 	if stats.DuplicateSets != 1 {
@@ -181,8 +182,8 @@ func TestDetect_DuplicateEpisode(t *testing.T) {
 
 func TestDetect_DifferentEpisodes(t *testing.T) {
 	d := New()
-	// Same show folder on different storages → should be in same group (folder-level dedup)
-	// Different show folders → should be in different groups
+	// Same episode across different storages should duplicate; different
+	// episodes in the same show should remain unique.
 	entries := []FileEntry{
 		makeFile(1, "quark", "狂飙_S01E01.mp4", "/quark/电视剧/狂飙/狂飙_S01E01.mp4", 500000000),
 		makeFile(2, "quark", "狂飙_S01E02.mp4", "/quark/电视剧/狂飙/狂飙_S01E02.mp4", 500000000),
@@ -192,16 +193,109 @@ func TestDetect_DifferentEpisodes(t *testing.T) {
 
 	groups, stats := d.Detect(entries)
 
-	// 狂飙 from quark and tianyi should be in one folder-level group
-	// 漫长的季节 should be another group (different folder)
-	if len(groups) != 2 {
-		t.Fatalf("expected 2 groups (狂飙 folder, 漫长的季节 folder), got %d", len(groups))
+	// Episode-level grouping: 狂飙 S01E01 duplicate, 狂飙 S01E02 unique,
+	// 漫长的季节 S01E01 unique.
+	if len(groups) != 3 {
+		t.Fatalf("expected 3 episode groups, got %d", len(groups))
 	}
 	if stats.DuplicateSets != 1 {
-		t.Errorf("expected 1 duplicate set (狂飙 across storages), got %d", stats.DuplicateSets)
+		t.Errorf("expected 1 duplicate set (狂飙 S01E01 across storages), got %d", stats.DuplicateSets)
 	}
-	if stats.UniqueFiles != 1 {
-		t.Errorf("expected 1 unique file (漫长的季节), got %d", stats.UniqueFiles)
+	if stats.UniqueFiles != 2 {
+		t.Errorf("expected 2 unique files (other episodes), got %d", stats.UniqueFiles)
+	}
+}
+
+func TestDetect_DifferentEpisodesSameStorageAreNotDuplicates(t *testing.T) {
+	d := New()
+	entries := []FileEntry{
+		makeFile(1, "quark", "Show.S01E01.mkv", "/quark/Show/Show.S01E01.mkv", 500000000),
+		makeFile(2, "quark", "Show.S01E02.mkv", "/quark/Show/Show.S01E02.mkv", 500000000),
+		makeFile(3, "quark", "Show.S01E03.mkv", "/quark/Show/Show.S01E03.mkv", 500000000),
+	}
+
+	groups, stats := d.Detect(entries)
+	if len(groups) != 3 {
+		t.Fatalf("expected 3 unique episode groups, got %d", len(groups))
+	}
+	if stats.DuplicateSets != 0 {
+		t.Errorf("expected no duplicate sets for different episodes, got %d", stats.DuplicateSets)
+	}
+	if stats.UniqueFiles != 3 {
+		t.Errorf("expected 3 unique files, got %d", stats.UniqueFiles)
+	}
+}
+
+func TestDetect_SameStorageSameTVDifferentFoldersAreDuplicates(t *testing.T) {
+	d := New()
+	entries := []FileEntry{
+		makeFile(1, "quark", "狂飙.S01E01.mkv", "/quark/电视剧/狂飙/狂飙.S01E01.mkv", 500000000),
+		makeFile(2, "quark", "狂飙.S01E02.mkv", "/quark/电视剧/狂飙/狂飙.S01E02.mkv", 500000000),
+		makeFile(3, "quark", "狂飙.S01E03.mkv", "/quark/电视剧/狂飙/狂飙.S01E03.mkv", 500000000),
+		makeFile(4, "quark", "狂飙.S01E01.mkv", "/quark/来自分享/狂飙 4K/狂飙.S01E01.mkv", 600000000),
+		makeFile(5, "quark", "狂飙.S01E02.mkv", "/quark/来自分享/狂飙 4K/狂飙.S01E02.mkv", 600000000),
+	}
+
+	groups, stats := d.Detect(entries)
+	if len(groups) != 1 {
+		t.Fatalf("expected one folder-level duplicate group, got %d", len(groups))
+	}
+	g := groups[0]
+	if g.EpisodeTag != folderLevelTag {
+		t.Fatalf("expected folder-level group, got %s", g.EpisodeTag)
+	}
+	if stats.DuplicateSets != 1 {
+		t.Errorf("expected 1 duplicate set, got %d", stats.DuplicateSets)
+	}
+	if stats.KeepFiles != 3 {
+		t.Errorf("expected complete 3-episode folder to be kept, got %d keep files", stats.KeepFiles)
+	}
+	if stats.DeleteFiles != 2 {
+		t.Errorf("expected smaller duplicate folder to be deleted, got %d delete files", stats.DeleteFiles)
+	}
+	for _, f := range g.Files {
+		if strings.Contains(f.Path, "/电视剧/狂飙/") && f.Decision != Keep {
+			t.Errorf("expected complete folder file to be Keep: %s got %s", f.Path, f.Decision)
+		}
+		if strings.Contains(f.Path, "/来自分享/狂飙 4K/") && f.Decision != Delete {
+			t.Errorf("expected smaller folder file to be Delete: %s got %s", f.Path, f.Decision)
+		}
+	}
+}
+
+func TestDetect_BareEpisodeFilesUseFolderAndEpisodeNumber(t *testing.T) {
+	d := New()
+	entries := []FileEntry{
+		makeFile(1, "local", "01.mkv", "/local/剧集/绝命毒师/Season 1/01.mkv", 700000000),
+		makeFile(2, "quark", "01.mkv", "/quark/剧集/绝命毒师/S01/01.mkv", 700000000),
+		makeFile(3, "local", "02.mkv", "/local/剧集/绝命毒师/Season 1/02.mkv", 700000000),
+	}
+
+	groups, stats := d.Detect(entries)
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 episode groups, got %d", len(groups))
+	}
+	if stats.DuplicateSets != 1 {
+		t.Errorf("expected S01E01 duplicate only, got %d duplicate sets", stats.DuplicateSets)
+	}
+	if groups[0].NormalizedName != "绝命毒师" || groups[0].EpisodeTag != "S01E01" {
+		t.Errorf("unexpected first group identity: %s %s", groups[0].NormalizedName, groups[0].EpisodeTag)
+	}
+}
+
+func TestDetect_SameTitleDifferentYearsAreDifferentMovies(t *testing.T) {
+	d := New()
+	entries := []FileEntry{
+		makeFile(1, "local", "Movie.2020.1080p.mkv", "/local/movie-2020.mkv", 1000000),
+		makeFile(2, "quark", "Movie.2021.1080p.mkv", "/quark/movie-2021.mkv", 1000000),
+	}
+
+	groups, stats := d.Detect(entries)
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 movie groups by year, got %d", len(groups))
+	}
+	if stats.DuplicateSets != 0 {
+		t.Errorf("expected different years to avoid duplicate detection, got %d", stats.DuplicateSets)
 	}
 }
 
@@ -353,8 +447,8 @@ func TestDetect_DuplicateSize(t *testing.T) {
 
 func TestSizeWithinTolerance(t *testing.T) {
 	tests := []struct {
-		a, b  int64
-		want  bool
+		a, b int64
+		want bool
 	}{
 		{1000, 1000, true},
 		{1000, 1005, true},  // 0.5%

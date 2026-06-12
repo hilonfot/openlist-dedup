@@ -22,6 +22,9 @@ type MediaInfo struct {
 
 	// IsEpisode is true when a season/episode pattern was detected.
 	IsEpisode bool
+
+	// Year is the release year found in the name (1900-2029), or 0 if none.
+	Year int
 }
 
 // qualityPatterns lists quality/resolution tags to remove, ordered longest
@@ -240,6 +243,9 @@ func Normalize(filename string) MediaInfo {
 	// tags so patterns like "S01E01" aren't destroyed.
 	info := extractEpisodeInfo(name)
 
+	// Extract release year from the name for downstream use
+	info.Year, _ = findReleaseYear(name)
+
 	// Step 6: Try year-anchored normalization
 	cleaned := normalizeByYear(name)
 
@@ -361,7 +367,7 @@ func normalizeSeparators(name string) string {
 // contains supplementary metadata (Chinese tags, format notes, group names, etc.)
 // that should not be part of the normalized title.
 func removeBrackets(name string) string {
-	re := regexp.MustCompile(`[【\[〖][^】\]〗]+[】\]〗]`)
+	re := regexp.MustCompile(`[【\[〖《][^】\]〗》]+[】\]〗》]`)
 	return re.ReplaceAllString(name, " ")
 }
 // extractEpisodeInfo checks the string for season/episode patterns.

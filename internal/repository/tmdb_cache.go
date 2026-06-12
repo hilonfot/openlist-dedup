@@ -58,7 +58,7 @@ func (db *DB) SaveTMDBCache(ctx context.Context, normalizedName, mediaType strin
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO tmdb_cache (normalized_name, tmdb_id, media_type, data)
 		VALUES (?, ?, ?, ?)
-		ON CONFLICT(normalized_name) DO UPDATE SET
+		ON CONFLICT(normalized_name, media_type) DO UPDATE SET
 			tmdb_id = excluded.tmdb_id,
 			media_type = excluded.media_type,
 			data = excluded.data,

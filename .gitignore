@@ -40,5 +40,7 @@ cleanup_plan.json
 /data/
 
 # Editor/IDE
-# .idea/
-# .vscode/
+.claude/
+.idea/
+.vscode/
+.gocache/

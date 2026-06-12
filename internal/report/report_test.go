@@ -54,7 +54,7 @@ func TestGenerate_Success(t *testing.T) {
 	}
 	html := string(content)
 
-	if !strings.Contains(html, "OpenList 媒体报告") {
+	if !strings.Contains(html, "OpenList") {
 		t.Error("expected report title in HTML")
 	}
 	if !strings.Contains(html, "Avatar") {
@@ -113,6 +113,55 @@ func TestGenerate_TVGroups(t *testing.T) {
 	}
 	if !strings.Contains(html, "Breaking Bad") {
 		t.Error("expected TV show name in HTML")
+	}
+}
+
+func TestGenerate_TVFolderDuplicatesShowFoldersOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tv_folder_report.html")
+
+	data := ReportData{
+		OpenListBaseURL: "http://openlist.local",
+		MovieGroups: []duplicate.DuplicateGroup{
+			{
+				NormalizedName: "狂飙",
+				EpisodeTag:     "__FOLDER__",
+				IsEpisode:      true,
+				Files: []duplicate.FileEntry{
+					{ID: 1, Storage: "quark", Path: "/quark/电视剧/狂飙/狂飙.S01E01.mkv", Name: "狂飙.S01E01.mkv", Size: 500, Decision: duplicate.Keep},
+					{ID: 2, Storage: "quark", Path: "/quark/电视剧/狂飙/狂飙.S01E02.mkv", Name: "狂飙.S01E02.mkv", Size: 500, Decision: duplicate.Keep},
+					{ID: 3, Storage: "quark", Path: "/quark/来自分享/狂飙 4K/狂飙.S01E01.mkv", Name: "狂飙.S01E01.mkv", Size: 600, Decision: duplicate.Delete},
+					{ID: 4, Storage: "quark", Path: "/quark/来自分享/狂飙 4K/狂飙.S01E02.mkv", Name: "狂飙.S01E02.mkv", Size: 600, Decision: duplicate.Delete},
+				},
+			},
+		},
+		Stats: duplicate.Stats{TotalFiles: 4, DuplicateSets: 1, DuplicateFiles: 4},
+	}
+
+	if err := Generate(path, data); err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	html := string(content)
+
+	if !strings.Contains(html, "2 个目录") {
+		t.Error("expected TV duplicate summary to count folders")
+	}
+	if strings.Count(html, `href="http://openlist.local/`) < 2 {
+		t.Error("expected folder OpenList links")
+	}
+	if !strings.Contains(html, "狂飙") {
+		t.Error("expected keep folder name")
+	}
+	if !strings.Contains(html, "狂飙 4K") {
+		t.Error("expected delete folder name")
+	}
+	if strings.Contains(html, "狂飙.S01E01.mkv") || strings.Contains(html, "狂飙.S01E02.mkv") {
+		t.Error("expected TV duplicate summary to hide individual episode filenames")
 	}
 }
 

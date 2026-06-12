@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -269,47 +268,50 @@ func run() int {
 					CacheTTL:    time.Duration(cfg.TMDB.CacheTTL) * time.Second,
 					RateLimit:   cfg.TMDB.RateLimit,
 				})
-				// Quick connectivity check for TMDB
-				if !tmdbCheckReachable(ctx, cfg.TMDB.BaseURL) {
-					log.Warn("TMDB API is not reachable (network blocked), skipping poster lookup")
-				} else {
 				for _, g := range groups {
 					name := g.NormalizedName
+					if name == "" {
+						continue
+					}
 					if _, ok := tmdbData[name]; ok {
 						continue
 					}
+					year := g.Year
 					if g.IsEpisode {
-						if result, err := tmdbClient.SearchTV(ctx, name, 0, 0); err == nil && result != nil {
-							if err != nil {
-								log.Warn("TMDB TV search failed", "name", name, "error", err)
-							}
-								log.Debug("TMDB: TV lookup", "name", name, "found", result != nil)
+						result, err := tmdbClient.SearchTV(ctx, name, 0, year)
+						if err != nil {
+							log.Warn("TMDB TV search failed", "name", name, "error_msg", err.Error())
+						} else if result != nil {
+							log.Debug("TMDB: TV lookup", "name", name, "found", true, "id", result.TMDBID)
 							tmdbData[name] = report.TMDBItem{
 								PosterURL: result.PosterURL,
 								Overview:  result.Overview,
 								Rating:    result.VoteAverage,
 								TMDBURL:   result.TMDBURL,
-									Title:     result.Name,
+								Title:     result.Name,
 							}
+						} else {
+							log.Debug("TMDB: TV not found", "name", name, "year", year)
 						}
 					} else {
-						if result, err := tmdbClient.SearchMovie(ctx, name, 0); err == nil && result != nil {
-							if err != nil {
-								log.Warn("TMDB Movie search failed", "name", name, "error", err)
-							}
-								log.Debug("TMDB: Movie lookup", "name", name, "found", result != nil)
+						result, err := tmdbClient.SearchMovie(ctx, name, year)
+						if err != nil {
+							log.Warn("TMDB Movie search failed", "name", name, "error_msg", err.Error())
+						} else if result != nil {
+							log.Debug("TMDB: Movie lookup", "name", name, "found", true, "id", result.TMDBID)
 							tmdbData[name] = report.TMDBItem{
 								PosterURL: result.PosterURL,
 								Overview:  result.Overview,
 								Rating:    result.VoteAverage,
 								TMDBURL:   result.TMDBURL,
-									Title:     result.Title,
+								Title:     result.Title,
 							}
+						} else {
+							log.Debug("TMDB: Movie not found", "name", name, "year", year)
 						}
 					}
 				}
 			}
-				}
 
 		if modeReport {
 			reportData := report.ReportData{
@@ -365,18 +367,6 @@ func run() int {
 	return 0
 }
 
-// tmdbCheckReachable tests if TMDB API is accessible.
-func tmdbCheckReachable(ctx context.Context, baseURL string) bool {
-	if baseURL == "" {
-		baseURL = "https://tmdb-proxy.hilon2019.workers.dev"
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/3/configuration?api_key=test", nil)
-	if err != nil { return false }
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil { return false }
-	resp.Body.Close()
-	return resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusOK
-}
 
 // flag returns the value after the given flag, or defaultValue if not found.
 func flag(name, defaultValue string) string {
