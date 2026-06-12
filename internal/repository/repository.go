@@ -88,13 +88,15 @@ func Open(path string) (*DB, error) {
 	return w, nil
 }
 
-// initSchema creates all tables and indexes.
+// initSchema creates all tables and indexes, and performs any needed schema migrations.
 func (db *DB) initSchema(ctx context.Context) error {
 	for _, stmt := range []string{schemaMediaFiles, schemaScanTasks, schemaTMDBCache} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("exec schema: %w", err)
 		}
 	}
+	// Migrate tmdb_cache from old single-column UNIQUE to composite UNIQUE if needed
+	db.migrateTMDBSchema(ctx)
 	return nil
 }
 
