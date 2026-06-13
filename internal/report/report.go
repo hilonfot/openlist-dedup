@@ -286,7 +286,7 @@ func flattenEntities(dir *dirNode, depth int, prefix string, tmdbData map[string
 			TMDBTitle:   tmdbDisplayTitle(tmdb)})
 	}
 
-	if hasMovies {
+	if hasMovies && !hasEpisodes {
 		for _, f := range dir.files {
 			info := media.Normalize(f.Name)
 			if info.IsEpisode {
@@ -760,143 +760,190 @@ const reportTemplate = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>OpenList · 媒体库报告</title>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;600;700;800;900&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+/* ===== RESET & BASE ===== */
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Inter','PingFang SC','Microsoft YaHei',sans-serif;background:#0B0B0E;color:#E8E4DF;min-height:100vh;padding:0}
-.container{max-width:960px;margin:0 auto;padding:40px 24px}
+body{font-family:'Inter','PingFang SC','Microsoft YaHei',sans-serif;background:#060B14;color:#90A4AE;min-height:100vh;padding:0}
+body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:radial-gradient(circle,rgba(0,229,255,.03) 1px,transparent 1px);
+  background-size:32px 32px;
+  mask-image:radial-gradient(ellipse 60% 50% at 50% 30%,#000 30%,transparent 70%);
+  -webkit-mask-image:radial-gradient(ellipse 60% 50% at 50% 30%,#000 30%,transparent 70%);
+}
+.container{max-width:960px;margin:0 auto;padding:48px 24px;position:relative;z-index:1;counter-reset:sec 0}
 
-/* Header */
-.header{padding:0 0 36px}
-.header h1{font-size:26px;font-weight:700;letter-spacing:-.4px;color:#F5F0EB;margin-bottom:6px}
-.header .sub{font-size:13px;color:#6B6B7A;letter-spacing:.3px}
+/* ===== HERO HEADER ===== */
+.hero{display:grid;grid-template-columns:1fr auto;gap:32px;margin-bottom:48px;align-items:end;padding-bottom:32px;border-bottom:1px solid rgba(0,229,255,.08);position:relative}
+.hero::after{content:'';position:absolute;bottom:-1px;left:0;width:120px;height:2px;background:linear-gradient(90deg,#00E5FF,rgba(0,229,255,0))}
 
-/* Section */
-.section{margin-bottom:32px}
-.section-header{display:flex;align-items:center;gap:12px;margin-bottom:16px}
-.section-header-line{flex:1;height:1px;background:linear-gradient(90deg,#2C2C36,transparent)}
-.section-title{font-size:11px;font-weight:600;color:#7C7C8C;letter-spacing:1.2px;white-space:nowrap}
+/* left side: title block */
+.hero-l .eyebrow{font-family:'PingFang SC','Microsoft YaHei','Heiti SC',sans-serif;font-size:12px;font-weight:600;letter-spacing:1.5px;color:#00E5FF;margin-bottom:10px}
+.hero-l h1{font-family:'PingFang SC','Microsoft YaHei','Heiti SC',sans-serif;font-size:30px;font-weight:700;letter-spacing:6px;color:#E0F7FA;line-height:1.2;margin-bottom:8px}
+.hero-l .tagline{font-family:'PingFang SC','Microsoft YaHei','Heiti SC',sans-serif;font-size:12px;color:#607D8B;letter-spacing:.4px}
+.hero-l .tagline em{font-style:normal;color:#00E5FF;font-weight:500}
 
-/* Card */
-.card{background:linear-gradient(180deg,#1A1A22 0%,#14141B 100%);border:1px solid #2C2C36;border-radius:14px;overflow:hidden}
+/* right side: status block */
+.hero-r{display:flex;flex-direction:column;align-items:flex-end;gap:14px}
+.status-row{display:flex;gap:24px;flex-wrap:wrap;justify-content:flex-end}
+.status-item{text-align:right}
+.status-item .sv{font-family:'Orbitron',monospace;font-size:24px;font-weight:700;color:#00E5FF;letter-spacing:-.5px;text-shadow:0 0 12px rgba(0,229,255,.2)}
+.status-item .sl{font-family:'PingFang SC','Microsoft YaHei','Heiti SC',sans-serif;font-size:11px;color:#78909C;letter-spacing:.3px;margin-top:3px}
+.status-item.warn .sv{color:#FF5252;text-shadow:0 0 12px rgba(255,82,82,.2)}
+.status-item.ok .sv{color:#69F0AE;text-shadow:0 0 12px rgba(105,240,174,.15)}
 
-/* Stats grid */
+/* ===== SECTION ===== */
+.section{margin-bottom:44px;counter-increment:sec}
+.sec-label{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.sec-label .idx{font-family:'Orbitron',sans-serif;font-size:10px;color:#7C4DFF;font-weight:600;letter-spacing:1px;min-width:28px}.sec-label .idx::before{content:counter(sec,decimal-leading-zero)}
+.sec-label .name{font-family:'Orbitron',sans-serif;font-size:9px;font-weight:600;color:#546E7A;letter-spacing:1.4px}
+.sec-label .line{flex:1;height:1px;background:linear-gradient(90deg,rgba(0,229,255,.12),transparent)}
+
+/* ===== CARD ===== */
+.card{background:rgba(10,18,32,.75);border:1px solid rgba(0,229,255,.06);overflow:hidden;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);position:relative}
+.card::before{content:'';position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,rgba(0,229,255,.02) 0%,transparent 50%);z-index:1}
+.card>*{position:relative;z-index:2}
+
+/* ===== STATS MINI-GRID ===== */
 .stats-grid{display:grid;grid-template-columns:repeat(5,1fr)}
-.stat-cell{text-align:center;padding:28px 10px 24px;position:relative;border-right:1px solid #2C2C36}
+.stat-cell{text-align:center;padding:24px 8px 20px;position:relative;border-right:1px solid rgba(0,229,255,.05)}
 .stat-cell:last-child{border-right:none}
-.stat-value{font-family:'Space Grotesk',monospace;font-size:32px;font-weight:700;letter-spacing:-1px;color:#F5B342}
-.stat-cell.warn .stat-value{color:#FB7185}
-.stat-cell.ok .stat-value{color:#34D399}
-.stat-label{font-size:10px;color:#6B6B7A;margin-top:6px;letter-spacing:1.2px;font-weight:600}
+.stat-value{font-family:'Orbitron',monospace;font-size:28px;font-weight:700;letter-spacing:-.5px;color:#00E5FF}
+.stat-cell.warn .stat-value{color:#FF5252}
+.stat-cell.ok .stat-value{color:#69F0AE}
+.stat-label{font-family:'JetBrains Mono',monospace;font-size:9px;color:#546E7A;margin-top:6px;letter-spacing:.6px}
 
-/* Storage table */
-.storage-table{width:100%;border-collapse:collapse;font-size:13px}
-.storage-table th{text-align:left;padding:14px 18px;font-weight:600;color:#6B6B7A;font-size:10px;letter-spacing:1px;background:#0F0F14;border-bottom:1px solid #2C2C36}
-.storage-table td{padding:12px 18px;border-bottom:1px solid #1F1F28;color:#8C8C9A;font-size:13px}
+/* ===== STORAGE TABLE ===== */
+.storage-table{width:100%;border-collapse:collapse}
+.storage-table th{text-align:left;padding:12px 16px;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:500;color:#546E7A;letter-spacing:.6px;background:rgba(0,229,255,.02);border-bottom:1px solid rgba(0,229,255,.06)}
+.storage-table td{padding:11px 16px;border-bottom:1px solid rgba(0,229,255,.03);font-size:13px;color:#78909C}
 .storage-table tr:last-child td{border-bottom:none}
-.storage-table td:first-child{font-weight:600;color:#F5F0EB}
-.bar-container{height:6px;background:#2C2C36;border-radius:3px;overflow:hidden;min-width:60px}
-.bar-fill{height:100%;border-radius:3px;transition:width .8s cubic-bezier(.4,0,.2,1)}
-.bar-fill.quark{background:linear-gradient(90deg,#14B8A6,#2DD4BF)}
-.bar-fill.tianyi{background:linear-gradient(90deg,#0EA5E9,#38BDF8)}
-.bar-fill.local{background:linear-gradient(90deg,#A78BFA,#C4B5FD)}
+.storage-table tr:hover td{background:rgba(0,229,255,.015)}
+.storage-table td:first-child{font-weight:600;color:#B0BEC5}
+.bar-container{height:4px;background:rgba(0,229,255,.05);overflow:hidden;min-width:50px}
+.bar-fill{height:100%;transition:width 1.2s cubic-bezier(.4,0,.2,1);position:relative}
+.bar-fill::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent 50%,rgba(255,255,255,.2))}
+.bar-fill.quark{background:#00E5FF}
+.bar-fill.tianyi{background:#7C4DFF}
+.bar-fill.local{background:#00E676}
 
-/* Duplicate group cards */
-.dup-group{border-bottom:1px solid #1F1F28;padding:18px 20px 14px}
+/* ===== TAGS ===== */
+.storage-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:500;letter-spacing:.2px;text-transform:uppercase;border:1px solid}
+.storage-tag::before{content:'';width:6px;height:6px;flex-shrink:0}
+.local-tag{background:rgba(0,230,118,.06);color:#69F0AE;border-color:rgba(0,230,118,.12)}.local-tag::before{background:#00E676}
+.quark-tag{background:rgba(0,229,255,.06);color:#00E5FF;border-color:rgba(0,229,255,.12)}.quark-tag::before{background:#00E5FF}
+.tianyi-tag{background:rgba(124,77,255,.06);color:#B388FF;border-color:rgba(124,77,255,.12)}.tianyi-tag::before{background:#7C4DFF}
+
+/* ===== DUPLICATE LOG ===== */
+.dup-group{border-bottom:1px solid rgba(0,229,255,.04);padding:16px 18px 12px;transition:background .15s}
 .dup-group:last-child{border-bottom:none}
-.dup-header{display:flex;align-items:center;gap:10px;margin-bottom:10px}
-.dup-icon{font-size:16px;width:22px;text-align:center;flex-shrink:0}
-.dup-name{font-size:15px;font-weight:600;color:#F5F0EB;flex:1;min-width:0}
-.dup-count{font-size:12px;color:#6B6B7A;white-space:nowrap;flex-shrink:0}
-.dup-storages{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
-.dup-storage-badge{display:inline-flex;align-items:center;gap:6px;font-size:10px;padding:4px 12px;border-radius:20px;font-weight:600;letter-spacing:.3px}
-.dup-storage-badge.keep{background:rgba(16,185,129,.1);color:#34D399;border:1px solid rgba(16,185,129,.2)}
-.dup-storage-badge.delete{background:rgba(239,68,68,.1);color:#FB7185;border:1px solid rgba(239,68,68,.2)}
-.dup-storage-badge .storage-tag{font-size:9px;padding:1px 6px}
-.dup-files{margin:0 -20px;padding:0}
-.dup-file{display:flex;align-items:center;gap:10px;padding:6px 20px;text-decoration:none;color:inherit;transition:background .15s ease;font-size:13px}
-.dup-file:hover{background:rgba(245,179,66,.04)}
-.dup-file-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8C8C9A}
-.dup-file-size{color:#6B6B7A;white-space:nowrap;flex-shrink:0}
-.dup-file-decision{font-size:9px;padding:2px 12px;border-radius:12px;font-weight:600;flex-shrink:0;letter-spacing:.3px}
-.dup-file-decision.keep{background:rgba(16,185,129,.1);color:#34D399;border:1px solid rgba(16,185,129,.2)}
-.dup-file-decision.delete{background:rgba(239,68,68,.1);color:#FB7185;border:1px solid rgba(239,68,68,.2)}
-.dup-file-decision.unique{background:rgba(108,108,122,.1);color:#6B6B7A;border:1px solid rgba(108,108,122,.15)}
+.dup-group:hover{background:rgba(0,229,255,.01)}
+.dup-header{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.dup-icon{font-size:15px;flex-shrink:0;opacity:.7}
+.dup-name{font-size:14px;font-weight:600;color:#B0BEC5;flex:1;min-width:0}
+.dup-count{font-family:'JetBrains Mono',monospace;font-size:10px;color:#546E7A;white-space:nowrap}
+.dup-storages{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+.dup-storage-badge{display:inline-flex;align-items:center;gap:5px;font-family:'JetBrains Mono',monospace;font-size:9px;padding:2px 10px;border:1px solid;font-weight:500;letter-spacing:.2px}
+.dup-storage-badge.keep{background:rgba(0,230,118,.06);color:#69F0AE;border-color:rgba(0,230,118,.15)}
+.dup-storage-badge.delete{background:rgba(255,82,82,.06);color:#FF5252;border-color:rgba(255,82,82,.15)}
+.dup-storage-badge .storage-tag{font-size:8px;padding:1px 5px}
+.dup-files{margin:0 -18px}
+.dup-file{display:flex;align-items:center;gap:8px;padding:5px 18px;text-decoration:none;color:inherit;transition:background .12s;font-size:12px}
+.dup-file:hover{background:rgba(0,229,255,.03)}
+.dup-file-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#607D8B}
+.dup-file-size{font-family:'JetBrains Mono',monospace;font-size:10px;color:#546E7A;white-space:nowrap}
+.dup-file-decision{font-family:'JetBrains Mono',monospace;font-size:8px;padding:1px 8px;font-weight:500;border:1px solid}
+.dup-file-decision.keep{background:rgba(0,230,118,.06);color:#69F0AE;border-color:rgba(0,230,118,.15)}
+.dup-file-decision.delete{background:rgba(255,82,82,.06);color:#FF5252;border-color:rgba(255,82,82,.15)}
+.dup-file-decision.unique{background:transparent;color:#546E7A;border-color:rgba(84,110,122,.12)}
 
-/* Storage tags */
-.storage-tag{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:600;letter-spacing:.2px;text-transform:capitalize}
-.storage-tag::before{content:'';width:5px;height:5px;border-radius:50%;flex-shrink:0}
-.local-tag{background:rgba(167,139,250,.08);color:#C4B5FD;border:1px solid rgba(167,139,250,.15)}
-.local-tag::before{background:#A78BFA}
-.quark-tag{background:rgba(20,184,166,.08);color:#5EEAD4;border:1px solid rgba(20,184,166,.15)}
-.quark-tag::before{background:#14B8A6}
-.tianyi-tag{background:rgba(14,165,233,.08);color:#7DD3FC;border:1px solid rgba(14,165,233,.15)}
-.tianyi-tag::before{background:#0EA5E9}
-
-/* Poster wall grid */
-.poster-wall{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:16px;padding:20px}
-.poster-card{display:flex;flex-direction:column;text-decoration:none;color:inherit;border-radius:10px;overflow:hidden;transition:transform .25s cubic-bezier(.4,0,.2,1),box-shadow .25s cubic-bezier(.4,0,.2,1);background:#1A1A22;border:1px solid #2C2C36;position:relative}
-.poster-card:hover{transform:translateY(-4px) scale(1.02);box-shadow:0 12px 40px rgba(0,0,0,.5),0 0 0 1px rgba(245,179,66,.12);z-index:2}
-.poster-img-wrap{position:relative;width:100%;aspect-ratio:2/3;overflow:hidden;background:#2C2C36}
-.poster-img{width:100%;height:100%;object-fit:cover;display:block}
-.poster-placeholder{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:700;color:#6B6B7A;background:linear-gradient(135deg,#2C2C36,#1F1F28)}
-.poster-badge{position:absolute;top:8px;right:8px;font-size:9px;padding:2px 10px;border-radius:12px;font-weight:700;letter-spacing:.4px;z-index:1;backdrop-filter:blur(4px)}
-.poster-badge-keep{background:rgba(16,185,129,.85);color:#fff;border:1px solid rgba(16,185,129,.3)}
-.poster-badge-delete{background:rgba(239,68,68,.85);color:#fff;border:1px solid rgba(239,68,68,.3)}
+/* ===== POSTER WALL ===== */
+.poster-wall{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:16px;padding:18px}
+.poster-card{display:flex;flex-direction:column;text-decoration:none;color:inherit;overflow:hidden;transition:transform .25s cubic-bezier(.4,0,.2,1),box-shadow .25s;background:rgba(10,18,32,.5);border:1px solid rgba(0,229,255,.05);position:relative}
+.poster-card:hover{transform:translateY(-4px);box-shadow:0 12px 36px rgba(0,0,0,.5),0 0 0 1px rgba(0,229,255,.15);z-index:2}
+.poster-img-wrap{position:relative;width:100%;aspect-ratio:2/3;overflow:hidden;background:rgba(0,229,255,.03)}
+.poster-img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .4s cubic-bezier(.4,0,.2,1)}
+.poster-card:hover .poster-img{transform:scale(1.05)}
+.poster-placeholder{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-family:'Orbitron',sans-serif;font-size:30px;font-weight:700;color:rgba(0,229,255,.08);background:linear-gradient(135deg,rgba(0,229,255,.03),rgba(124,77,255,.03))}
+.poster-badge{position:absolute;top:6px;right:6px;font-family:'JetBrains Mono',monospace;font-size:8px;padding:2px 8px;font-weight:600;letter-spacing:.3px;z-index:1;backdrop-filter:blur(6px)}
+.poster-badge-keep{background:rgba(0,230,118,.8);color:#fff}
+.poster-badge-delete{background:rgba(255,82,82,.8);color:#fff}
 .poster-badge-unique{display:none}
-.poster-rating{position:absolute;top:8px;left:8px;font-size:10px;color:#F5B342;font-weight:700;background:rgba(0,0,0,.6);padding:2px 8px;border-radius:8px;backdrop-filter:blur(4px)}
-.poster-info{padding:12px 14px 16px;flex:1;display:flex;flex-direction:column;gap:4px}
-.poster-title{font-size:14px;font-weight:600;color:#F5F0EB;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.poster-meta{font-size:12px;color:#6B6B7A;line-height:1.4}
-.poster-meta .storage-tag{font-size:10px;padding:2px 8px;margin-top:3px}
+.poster-rating{position:absolute;top:6px;left:6px;font-family:'Orbitron',sans-serif;font-size:9px;color:#00E5FF;font-weight:600;background:rgba(6,11,20,.8);padding:2px 7px;border:1px solid rgba(0,229,255,.12);backdrop-filter:blur(6px)}
+.poster-info{padding:12px 12px 14px;flex:1;display:flex;flex-direction:column;gap:4px}
+.poster-title{font-size:13px;font-weight:600;color:#B0BEC5;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.poster-meta{font-family:'JetBrains Mono',monospace;font-size:10px;color:#546E7A;line-height:1.5}
+.poster-meta .storage-tag{font-size:9px;margin-top:2px}
 
-/* Mobile */
+/* ===== MOBILE ===== */
 @media(max-width:640px){
-.container{padding:24px 16px}
-.header h1{font-size:22px}
+.container{padding:28px 12px}
+.hero{grid-template-columns:1fr;gap:20px;margin-bottom:32px;padding-bottom:24px}
+.hero-r{flex-direction:row;flex-wrap:wrap;gap:18px}
+.status-row{justify-content:flex-start}
+.status-item{text-align:left}
+.status-item .sv{font-size:18px}
+.hero-l h1{font-size:22px;letter-spacing:3px}
 .stats-grid{grid-template-columns:repeat(3,1fr)}
-.stat-cell:nth-child(4),.stat-cell:nth-child(5){border-top:1px solid #2C2C36}
-.stat-value{font-size:26px}
-.stat-cell{padding:20px 6px 18px}
-.poster-wall{grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:12px;padding:14px}
-.poster-info{padding:10px 12px 14px}
-.poster-title{font-size:13px}
-.dup-group{padding:14px 14px 10px}
-.dup-file{padding:5px 14px;font-size:12px}
+.stat-cell:nth-child(4),.stat-cell:nth-child(5){border-top:1px solid rgba(0,229,255,.05)}
+.stat-value{font-size:22px}
+.stat-cell{padding:18px 4px 16px}
+.poster-wall{grid-template-columns:repeat(auto-fill,minmax(115px,1fr));gap:10px;padding:12px}
+.poster-info{padding:8px 10px 12px}
+.poster-title{font-size:12px}
+.dup-group{padding:12px 12px 8px}
+.dup-file{padding:4px 12px;font-size:11px}
+.storage-table th,.storage-table td{padding:9px 10px;font-size:11px}
 }
 </style>
 </head>
 <body>
 <div class="container">
 
-<div class="header"><h1>OpenList · 媒体库报告</h1>
-<div class="sub">{{.GeneratedAt}} · {{formatInt .Stats.TotalFiles}} 个文件 · 发现 {{formatInt .Stats.DuplicateSets}} 组重复内容</div></div>
+<!-- HERO HEADER -->
+<div class="hero">
+<div class="hero-l">
+<div class="eyebrow">openlist · 系统仪表盘</div>
+<h1>媒体库扫描报告</h1>
+<div class="tagline">扫描时间：<em>{{.GeneratedAt}}</em></div>
+</div>
+<div class="hero-r">
+<div class="status-row">
+<div class="status-item"><div class="sv">{{formatInt .Stats.TotalFiles}}</div><div class="sl">文件总数</div></div>
+<div class="status-item"><div class="sv">{{formatInt .Stats.UniqueFiles}}</div><div class="sl">唯一文件</div></div>
+<div class="status-item warn"><div class="sv">{{formatInt .Stats.DuplicateFiles}}</div><div class="sl">重复文件</div></div>
+</div>
+<div class="status-row">
+<div class="status-item warn"><div class="sv">{{formatInt .Stats.DuplicateSets}}</div><div class="sl">重复组数</div></div>
+<div class="status-item ok"><div class="sv">{{formatSize .Stats.DuplicateSize}}</div><div class="sl">可节省空间</div></div>
+</div>
+</div>
+</div>
 
-<div class="section"><div class="card"><div class="stats-grid">
-<div class="stat-cell"><div class="stat-value">{{formatInt .Stats.TotalFiles}}</div><div class="stat-label">文件</div></div>
-<div class="stat-cell ok"><div class="stat-value">{{formatInt .Stats.UniqueFiles}}</div><div class="stat-label">唯一</div></div>
-<div class="stat-cell warn"><div class="stat-value">{{formatInt .Stats.DuplicateFiles}}</div><div class="stat-label">重复</div></div>
-<div class="stat-cell warn"><div class="stat-value">{{formatInt .Stats.DuplicateSets}}</div><div class="stat-label">组</div></div>
-<div class="stat-cell ok"><div class="stat-value">{{formatSize .Stats.DuplicateSize}}</div><div class="stat-label">可节省</div></div>
-</div></div></div>
-
-{{if .StorageStats}}<div class="section"><div class="section-header"><div class="section-title">存储分布</div><div class="section-header-line"></div></div>
-<div class="card"><table class="storage-table"><thead><tr><th>存储</th><th>文件</th><th>总大小</th><th>重复</th><th>占比</th></tr></thead><tbody>
-{{range $s := .StorageStats}}<tr><td><span class="storage-tag {{$s.Name}}-tag">{{$s.Name}}</span></td><td>{{formatInt $s.FileCount}}</td><td>{{formatSize $s.TotalSize}}</td><td>{{formatSize $s.DupeSize}}</td><td><div class="bar-container"><div class="bar-fill {{$s.Name}}" style="width:{{printf "%.1f" $s.Percentage}}%"></div></div></td></tr>{{end}}
-</tbody></table></div></div>{{end}}
-
-{{if or .MovieGroups .TVGroups}}<div class="section"><div class="section-header"><div class="section-title">重复摘要</div><div class="section-header-line"></div></div>
+<!-- Duplicate Log -->
+{{if or .MovieGroups .TVGroups}}<div class="section">
+<div class="sec-label"><span class="idx"></span><span class="name">DUPLICATE_LOG</span><div class="line"></div></div>
 <div class="card">
-{{range $g := .MovieGroups}}{{$s := summarize $g}}<div class="dup-group"><div class="dup-header"><span class="dup-icon">🎬</span><span class="dup-name">{{$s.Name}}</span><span class="dup-count">{{len $s.Files}} 个文件 · {{formatSize $s.TotalSize}}</span></div>
+{{range $g := .MovieGroups}}{{$s := summarize $g}}<div class="dup-group"><div class="dup-header"><span class="dup-icon">🎬</span><span class="dup-name">{{$s.Name}}</span><span class="dup-count">{{len $s.Files}} files · {{formatSize $s.TotalSize}}</span></div>
 <div class="dup-storages">{{range $st := $s.Storages}}<span class="dup-storage-badge {{decisionLabel $st.Decision}}"><span class="storage-tag {{$st.Storage}}-tag">{{$st.Storage}}</span> {{$st.Decision}}</span>{{end}}</div>
 <div class="dup-files">{{range $f := $s.Files}}<a href="{{$f.OpenListURL}}" target="_blank" class="dup-file"><span class="dup-file-name">{{$f.Name}}</span><span class="dup-file-size">{{formatSize $f.Size}} · <span class="storage-tag {{$f.Storage}}-tag">{{$f.Storage}}</span></span><span class="dup-file-decision {{if eq $f.Decision "Keep"}}keep{{else if eq $f.Decision "Delete"}}delete{{else}}unique{{end}}">{{$f.Decision}}</span></a>{{end}}</div></div>
 {{end}}
-{{range $g := .TVGroups}}{{$s := summarize $g}}<div class="dup-group"><div class="dup-header"><span class="dup-icon">📺</span><span class="dup-name">{{$s.Name}}</span><span class="dup-count">{{len $s.Folders}} 个目录 · {{len $s.Files}} 个文件 · {{formatSize $s.TotalSize}}</span></div>
+{{range $g := .TVGroups}}{{$s := summarize $g}}<div class="dup-group"><div class="dup-header"><span class="dup-icon">📺</span><span class="dup-name">{{$s.Name}}</span><span class="dup-count">{{len $s.Folders}} dirs · {{len $s.Files}} files · {{formatSize $s.TotalSize}}</span></div>
 <div class="dup-storages">{{range $st := $s.Storages}}<span class="dup-storage-badge {{decisionLabel $st.Decision}}"><span class="storage-tag {{$st.Storage}}-tag">{{$st.Storage}}</span> {{$st.Decision}}</span>{{end}}</div>
-<div class="dup-files">{{range $f := $s.Folders}}<a href="{{$f.OpenListURL}}" target="_blank" class="dup-file"><span class="dup-file-name">{{$f.Name}}</span><span class="dup-file-size">{{formatInt $f.FileCount}} 集 · {{formatSize $f.Size}} · <span class="storage-tag {{$f.Storage}}-tag">{{$f.Storage}}</span></span><span class="dup-file-decision {{if eq $f.Decision "Keep"}}keep{{else if eq $f.Decision "Delete"}}delete{{else}}unique{{end}}">{{$f.Decision}}</span></a>{{end}}</div></div>
+<div class="dup-files">{{range $f := $s.Folders}}<a href="{{$f.OpenListURL}}" target="_blank" class="dup-file"><span class="dup-file-name">{{$f.Name}}</span><span class="dup-file-size">{{formatInt $f.FileCount}} eps · {{formatSize $f.Size}} · <span class="storage-tag {{$f.Storage}}-tag">{{$f.Storage}}</span></span><span class="dup-file-decision {{if eq $f.Decision "Keep"}}keep{{else if eq $f.Decision "Delete"}}delete{{else}}unique{{end}}">{{$f.Decision}}</span></a>{{end}}</div></div>
 {{end}}
 </div></div>{{end}}
 
-{{if .Movies}}<div class="section"><div class="section-header"><div class="section-title">电影 · {{len .Movies}}</div><div class="section-header-line"></div></div>
+<!-- Storage Distribution -->
+{{if .StorageStats}}<div class="section">
+<div class="sec-label"><span class="idx"></span><span class="name">STORAGE_DISTRIBUTION</span><div class="line"></div></div>
+<div class="card"><table class="storage-table"><thead><tr><th>STORAGE</th><th>FILES</th><th>TOTAL</th><th>DUPLICATES</th><th>%</th></tr></thead><tbody>
+{{range $s := .StorageStats}}<tr><td><span class="storage-tag {{$s.Name}}-tag">{{$s.Name}}</span></td><td>{{formatInt $s.FileCount}}</td><td>{{formatSize $s.TotalSize}}</td><td>{{formatSize $s.DupeSize}}</td><td><div class="bar-container"><div class="bar-fill {{$s.Name}}" style="width:{{printf "%.1f" $s.Percentage}}%"></div></div></td></tr>{{end}}
+</tbody></table></div></div>{{end}}
+
+<!-- Movies -->
+{{if .Movies}}<div class="section">
+<div class="sec-label"><span class="idx"></span><span class="name">MOVIES · {{len .Movies}} ENTRIES</span><div class="line"></div></div>
 <div class="card"><div class="poster-wall">
 {{range .Movies}}<a href="{{.OpenListURL}}" target="_blank" class="poster-card">
 <div class="poster-img-wrap">
@@ -909,7 +956,9 @@ body{font-family:'Inter','PingFang SC','Microsoft YaHei',sans-serif;background:#
 </a>{{end}}
 </div></div></div>{{end}}
 
-{{if .Shows}}<div class="section"><div class="section-header"><div class="section-title">电视剧 · {{len .Shows}}</div><div class="section-header-line"></div></div>
+<!-- TV Shows -->
+{{if .Shows}}<div class="section">
+<div class="sec-label"><span class="idx"></span><span class="name">TV_SERIES · {{len .Shows}} ENTRIES</span><div class="line"></div></div>
 <div class="card"><div class="poster-wall">
 {{range .Shows}}<a href="{{.OpenListURL}}" target="_blank" class="poster-card">
 <div class="poster-img-wrap">
@@ -918,7 +967,7 @@ body{font-family:'Inter','PingFang SC','Microsoft YaHei',sans-serif;background:#
 {{if .Rating}}<span class="poster-rating">{{.Rating}}</span>{{end}}
 </div>
 <div class="poster-info"><div class="poster-title">{{if .TMDBTitle}}{{.TMDBTitle}}{{else}}{{.Name}}{{end}}</div>
-<div class="poster-meta">{{.FileCount}} 集 · {{formatSize .Size}}<br><span class="storage-tag {{.Storage}}-tag">{{.Storage}}</span></div></div>
+<div class="poster-meta">{{.FileCount}} eps · {{formatSize .Size}}<br><span class="storage-tag {{.Storage}}-tag">{{.Storage}}</span></div></div>
 </a>{{end}}
 </div></div></div>{{end}}
 

@@ -108,7 +108,7 @@ func TestGenerate_TVGroups(t *testing.T) {
 	}
 	html := string(content)
 
-	if !strings.Contains(html, "重复摘要") {
+	if !strings.Contains(html, "DUPLICATE_LOG") {
 		t.Error("expected duplicate summary section in HTML")
 	}
 	if !strings.Contains(html, "Breaking Bad") {
@@ -148,7 +148,7 @@ func TestGenerate_TVFolderDuplicatesShowFoldersOnly(t *testing.T) {
 	}
 	html := string(content)
 
-	if !strings.Contains(html, "2 个目录") {
+	if !strings.Contains(html, "2 dirs") {
 		t.Error("expected TV duplicate summary to count folders")
 	}
 	if strings.Count(html, `href="http://openlist.local/`) < 2 {
@@ -193,7 +193,7 @@ func TestGenerate_StorageStats(t *testing.T) {
 	}
 	html := string(content)
 
-	if !strings.Contains(html, "存储分布") {
+	if !strings.Contains(html, "STORAGE_DISTRIBUTION") {
 		t.Error("expected storage stats section")
 	}
 	if !strings.Contains(html, "quark") {
@@ -346,7 +346,7 @@ func TestSeparateMovieAndTV(t *testing.T) {
 	}
 	html := string(content)
 
-	if !strings.Contains(html, "重复摘要") {
+	if !strings.Contains(html, "DUPLICATE_LOG") {
 		t.Error("expected duplicate summary section")
 	}
 }
