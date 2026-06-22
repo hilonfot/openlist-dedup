@@ -21,21 +21,33 @@ const (
 
 // PlanEntry represents a single file decision in the cleanup plan.
 type PlanEntry struct {
-	FileID  int64  `json:"file_id"`
-	Storage string `json:"storage"`
-	Path    string `json:"path"`
-	Name    string `json:"name"`
-	Size    int64  `json:"size"`
-	Action  Action `json:"action"`
-	Reason  string `json:"reason"`
+	FileID    int64  `json:"file_id"`
+	Storage   string `json:"storage"`
+	Path      string `json:"path"`
+	Name      string `json:"name"`
+	Size      int64  `json:"size"`
+	Action    Action `json:"action"`
+	Reason    string `json:"reason"`
+	DeletedAt string `json:"deleted_at,omitempty"` // populated when actually deleted
 }
 
 // Plan is the complete cleanup plan.
 type Plan struct {
 	DryRun      bool        `json:"dry_run"`
 	GeneratedAt string      `json:"generated_at"`
+	TrashDir    string      `json:"trash_dir,omitempty"` // conceptual trash directory
 	Entries     []PlanEntry `json:"entries"`
 	Stats       PlanStats   `json:"stats"`
+}
+
+// RecoveryEntry holds the minimum info needed to locate a deleted file.
+type RecoveryEntry struct {
+	Storage   string `json:"storage"`
+	Path      string `json:"path"`
+	Name      string `json:"name"`
+	Size      int64  `json:"size"`
+	Reason    string `json:"reason"`
+	DeletedAt string `json:"deleted_at"`
 }
 
 // PlanStats holds summary statistics for the plan.
@@ -48,17 +60,27 @@ type PlanStats struct {
 
 // Executor handles cleanup plan creation and execution.
 type Executor struct {
-	client *openlist.Client
-	dryRun bool
+	client   *openlist.Client
+	dryRun   bool
+	trashDir string
 }
+
+// TrashDirDefault is the default conceptual trash directory.
+const TrashDirDefault = "/.openlist-trash"
 
 // New creates a new cleanup Executor. When dryRun is true, Execute will
 // simulate deletions without calling the OpenList API.
 func New(client *openlist.Client, dryRun bool) *Executor {
 	return &Executor{
-		client: client,
-		dryRun: dryRun,
+		client:   client,
+		dryRun:   dryRun,
+		trashDir: TrashDirDefault,
 	}
+}
+
+// SetTrashDir sets the conceptual trash directory path.
+func (e *Executor) SetTrashDir(dir string) {
+	e.trashDir = dir
 }
 
 // CreatePlan builds a cleanup plan from duplicate groups. Files marked as
@@ -97,6 +119,7 @@ func (e *Executor) CreatePlan(groups []duplicate.DuplicateGroup) Plan {
 	return Plan{
 		DryRun:      e.dryRun,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		TrashDir:    e.trashDir,
 		Entries:     entries,
 		Stats: PlanStats{
 			TotalEntries:  len(entries),
@@ -134,14 +157,18 @@ func LoadPlan(path string) (Plan, error) {
 
 // Execute applies the cleanup plan. In dry-run mode it only logs actions.
 // In apply mode it calls the OpenList Delete API for each delete entry.
-// Returns a summary of what was done.
+// Returns a summary of what was done and a list of recovery entries for
+// any files that were actually deleted.
 func (e *Executor) Execute(ctx context.Context, plan Plan) (ExecutionResult, error) {
 	result := ExecutionResult{
-		DryRun:      e.dryRun || plan.DryRun,
+		DryRun:       e.dryRun || plan.DryRun,
 		TotalEntries: len(plan.Entries),
+		Recovery:     make([]RecoveryEntry, 0),
 	}
+	now := time.Now().UTC().Format(time.RFC3339)
 
-	for _, entry := range plan.Entries {
+	for i := range plan.Entries {
+		entry := &plan.Entries[i]
 		if entry.Action != ActionDelete {
 			result.Kept++
 			continue
@@ -163,8 +190,17 @@ func (e *Executor) Execute(ctx context.Context, plan Plan) (ExecutionResult, err
 			continue
 		}
 
+		entry.DeletedAt = now
 		result.Deleted++
 		result.SavedSpace += entry.Size
+		result.Recovery = append(result.Recovery, RecoveryEntry{
+			Storage:   entry.Storage,
+			Path:      entry.Path,
+			Name:      entry.Name,
+			Size:      entry.Size,
+			Reason:    entry.Reason,
+			DeletedAt: now,
+		})
 	}
 
 	return result, nil
@@ -172,14 +208,15 @@ func (e *Executor) Execute(ctx context.Context, plan Plan) (ExecutionResult, err
 
 // ExecutionResult summarizes what happened during plan execution.
 type ExecutionResult struct {
-	DryRun       bool          `json:"dry_run"`
-	TotalEntries int           `json:"total_entries"`
-	Kept         int           `json:"kept"`
-	Simulated    int           `json:"simulated"`
-	Deleted      int           `json:"deleted"`
-	Failed       int           `json:"failed"`
-	SavedSpace   int64         `json:"saved_space"`
-	Errors       []DeleteError `json:"errors,omitempty"`
+	DryRun       bool            `json:"dry_run"`
+	TotalEntries int             `json:"total_entries"`
+	Kept         int             `json:"kept"`
+	Simulated    int             `json:"simulated"`
+	Deleted      int             `json:"deleted"`
+	Failed       int             `json:"failed"`
+	SavedSpace   int64           `json:"saved_space"`
+	Errors       []DeleteError   `json:"errors,omitempty"`
+	Recovery     []RecoveryEntry `json:"recovery,omitempty"` // only populated for real deletions
 }
 
 // DeleteError represents a failed deletion.
@@ -229,4 +266,56 @@ func formatSize(bytes int64) string {
 	default:
 		return fmt.Sprintf("%d B", bytes)
 	}
+}
+
+// SaveResult writes the execution result as JSON to a file.
+func SaveResult(path string, result ExecutionResult) error {
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal result: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("write result: %w", err)
+	}
+	return nil
+}
+
+// LoadResult reads an execution result from a JSON file.
+func LoadResult(path string) (ExecutionResult, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ExecutionResult{}, fmt.Errorf("read result: %w", err)
+	}
+	var result ExecutionResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return ExecutionResult{}, fmt.Errorf("unmarshal result: %w", err)
+	}
+	return result, nil
+}
+
+// GenerateRestoreGuide returns a human-readable text guide describing what
+// was deleted and how to attempt recovery.
+func GenerateRestoreGuide(result ExecutionResult) string {
+	if len(result.Recovery) == 0 {
+		return "No files were deleted — nothing to restore."
+	}
+
+	s := fmt.Sprintf("=== RESTORE GUIDE ===\n")
+	s += fmt.Sprintf("Deleted at: %s\n", time.Now().UTC().Format(time.RFC3339))
+	s += fmt.Sprintf("Files deleted: %d\n", len(result.Recovery))
+	s += fmt.Sprintf("Total space: %s\n\n", formatSize(result.SavedSpace))
+	s += "The following files were permanently deleted from OpenList.\n"
+	s += "To restore, re-upload the original media files to the indicated paths.\n\n"
+	s += fmt.Sprintf("%-10s %-60s %s\n", "STORAGE", "PATH", "SIZE")
+	s += "-------------------------------------------------------------------------------\n"
+
+	for _, r := range result.Recovery {
+		s += fmt.Sprintf("%-10s %-60s %s\n", r.Storage, r.Path, formatSize(r.Size))
+	}
+
+	s += "\n---\n"
+	s += "Note: OpenList does not support a move-to-trash API.\n"
+	s += "Files were permanently deleted via /api/fs/remove.\n"
+	s += "Consider keeping your original media source as a backup.\n"
+	return s
 }

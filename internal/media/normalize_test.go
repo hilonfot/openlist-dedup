@@ -643,20 +643,24 @@ func TestNormalize_DirectoryName(t *testing.T) {
 
 func TestNormalize_MovieWithYearOnly(t *testing.T) {
 	tests := []struct {
-		input string
-		want  string
+		input     string
+		wantTitle string
+		wantYear  int
 	}{
-		// 年份作为标题，无发布年份
-		{"2012.mkv", "2012"},
-		// 年份作为标题+发布年份
-		{"1984.2023.1080p.mkv", "1984"},
-		{"2012.2009.1080p.BluRay.mkv", "2012"},
+		// 纯年份文件名：不设置 Year 防止误匹配
+		{"2012.mkv", "2012", 0},
+		// 年份作为标题+发布年份：第二个年份是发布年份
+		{"1984.2023.1080p.mkv", "1984", 0},
+		{"2012.2009.1080p.BluRay.mkv", "2012", 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			got := Normalize(tt.input)
-			if got.Title != tt.want {
-				t.Errorf("Normalize(%q).Title = %q, want %q", tt.input, got.Title, tt.want)
+			if got.Title != tt.wantTitle {
+				t.Errorf("Normalize(%q).Title = %q, want %q", tt.input, got.Title, tt.wantTitle)
+			}
+			if got.Year != tt.wantYear {
+				t.Errorf("Normalize(%q).Year = %d, want %d", tt.input, got.Year, tt.wantYear)
 			}
 			if got.IsEpisode {
 				t.Errorf("Normalize(%q).IsEpisode = true, want false", tt.input)

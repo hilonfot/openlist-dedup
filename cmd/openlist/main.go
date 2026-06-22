@@ -24,11 +24,12 @@ func main() {
 
 func run() int {
 	// Parse command-line flags manually (no external deps)
-	cfgPath := flag("--config", "configs/config.yaml")
+	cfgPath := flag("--config", ".env")
 	modeScan := hasFlag("--scan")
 	modeReport := hasFlag("--report")
 	modeCleanup := hasFlag("--cleanup")
 	applyCleanup := hasFlag("--apply")
+	modeRestore := hasFlag("--restore")
 	dbOverride := flag("--db", "")
 	workers := flagInt("--workers", 32)
 	clearData := hasFlag("--clear-data")
@@ -51,7 +52,7 @@ func run() int {
 	log = log.With("app", "openlist", "version", "0.1.0")
 
 	// If no mode specified, default to scan
-	if !modeScan && !modeReport && !modeCleanup {
+	if !modeScan && !modeReport && !modeCleanup && !modeRestore {
 		modeScan = true
 	}
 
@@ -260,13 +261,20 @@ func run() int {
 			// Look up TMDB poster and metadata for each duplicate group
 			tmdbData := make(map[string]report.TMDBItem)
 			if cfg.TMDB.APIKey != "" {
+				// Load local mapping for TMDB fallback
+				mapping, _ := config.LoadMapping(cfg.TMDB.MappingPath)
+				if mapping != nil {
+					log.Debug("Loaded local TMDB mapping", "path", cfg.TMDB.MappingPath, "entries", len(mapping))
+				}
+
 				tmdbClient := tmdb.New(tmdb.Config{
-					APIKey:      cfg.TMDB.APIKey,
-					BaseURL:     cfg.TMDB.BaseURL,
+					APIKey:       cfg.TMDB.APIKey,
+					BaseURL:      cfg.TMDB.BaseURL,
 					ImageBaseURL: cfg.TMDB.ImageBaseURL,
-					Cache:       db,
-					CacheTTL:    time.Duration(cfg.TMDB.CacheTTL) * time.Second,
-					RateLimit:   cfg.TMDB.RateLimit,
+					Cache:        db,
+					CacheTTL:     time.Duration(cfg.TMDB.CacheTTL) * time.Second,
+					RateLimit:    cfg.TMDB.RateLimit,
+					Mapping:      mapping,
 				})
 				for _, g := range groups {
 					name := g.NormalizedName
@@ -359,7 +367,50 @@ func run() int {
 				for _, e := range result.Errors {
 					log.Warn("Delete error", "path", e.Path, "error", e.Error)
 				}
+
+				// Save execution result for audit/recovery
+				resultPath := flag("--result-path", "cleanup_result.json")
+				if err := cleanup.SaveResult(resultPath, result); err != nil {
+					log.Error("Failed to save cleanup result", "error", err)
+				} else {
+					log.Info("Cleanup result saved", "path", resultPath)
+				}
+
+				// Generate and print restore guide
+				if result.Deleted > 0 {
+					guide := cleanup.GenerateRestoreGuide(result)
+					guidePath := flag("--restore-guide", "restore_guide.txt")
+					if err := os.WriteFile(guidePath, []byte(guide), 0644); err != nil {
+						log.Warn("Failed to write restore guide", "error", err)
+					} else {
+						log.Info("Restore guide saved", "path", guidePath)
+					}
+					fmt.Fprintf(os.Stderr, "\n%s\n", guide)
+				}
 			}
+		}
+	}
+
+	if modeRestore {
+		// Load a previous cleanup result and display recovery info
+		resultPath := flag("--plan-path", "cleanup_result.json")
+		log.Info("Loading cleanup result for restore", "path", resultPath)
+		result, err := cleanup.LoadResult(resultPath)
+		if err != nil {
+			log.Error("Failed to load cleanup result", "error", err, "hint", "Use a cleanup_result.json from a previous --cleanup --apply run")
+			return 1
+		}
+		if len(result.Recovery) == 0 {
+			log.Info("No deletions found in result — nothing to restore")
+			return 0
+		}
+		guide := cleanup.GenerateRestoreGuide(result)
+		fmt.Fprintf(os.Stderr, "\n%s\n", guide)
+		guidePath := flag("--restore-guide", "restore_guide.txt")
+		if err := os.WriteFile(guidePath, []byte(guide), 0644); err != nil {
+			log.Warn("Failed to write restore guide", "error", err)
+		} else {
+			log.Info("Restore guide saved", "path", guidePath)
 		}
 	}
 

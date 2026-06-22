@@ -282,7 +282,14 @@ func (d *Detector) groupByNormalizedName(entries []FileEntry) []DuplicateGroup {
 	var keys []string
 
 	for _, entry := range entries {
-		info := media.Normalize(entry.Name)
+		// Build parent directory chain for context-aware normalization
+		parentDir := filepath.Dir(entry.Path)
+		grandparentDir := filepath.Dir(parentDir)
+		info := media.NormalizeWithContext(entry.Name, parentDir, grandparentDir)
+
+		if info.Title == "" {
+			info.Title = strings.TrimSpace(entry.Name)
+		}
 
 		key, normName, epTag, isEp, year := mediaIdentity(entry, info)
 
@@ -311,9 +318,6 @@ func mediaIdentity(entry FileEntry, info media.MediaInfo) (key, normName, epTag 
 	year = info.Year
 	if info.IsEpisode {
 		normName = info.Title
-		if normName == "" || looksLikeEpisodeToken(normName) {
-			normName, year = folderTitle(entry, year)
-		}
 		epTag = info.EpisodeTag
 		if epTag == "" {
 			epTag = formatEpisodeTag(info.Season, info.Episode)
@@ -529,15 +533,38 @@ func (d *Detector) assignDecisions(files []FileEntry) {
 	if len(files) == 0 {
 		return
 	}
-	bestIdx := 0
-	bestPriority := storageRank(files[0].Storage)
-	for i := 1; i < len(files); i++ {
-		pri := storageRank(files[i].Storage)
-		if pri < bestPriority {
+
+	// Calculate quality fingerprints for all files.
+	// Quality-first: keep the best quality version; storage is the tiebreaker.
+	type scored struct {
+		idx   int
+		score int
+	}
+	scoredFiles := make([]scored, len(files))
+	for i, f := range files {
+		fp := media.ExtraceFingerprint(f.Name)
+		scoredFiles[i] = scored{idx: i, score: fp.Score()}
+	}
+
+	// Find the best file: highest quality score, storage as tiebreaker
+	bestIdx := scoredFiles[0].idx
+	bestScore := scoredFiles[0].score
+	bestPriority := storageRank(files[scoredFiles[0].idx].Storage)
+
+	for i := 1; i < len(scoredFiles); i++ {
+		si := scoredFiles[i].idx
+		pri := storageRank(files[si].Storage)
+
+		if scoredFiles[i].score > bestScore {
+			bestScore = scoredFiles[i].score
+			bestIdx = si
 			bestPriority = pri
-			bestIdx = i
+		} else if scoredFiles[i].score == bestScore && pri < bestPriority {
+			bestIdx = si
+			bestPriority = pri
 		}
 	}
+
 	for i := range files {
 		if i == bestIdx {
 			files[i].Decision = Keep

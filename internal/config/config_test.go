@@ -25,38 +25,29 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
-func TestLoadFromFile(t *testing.T) {
+func TestLoadEnvFile(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
+	path := filepath.Join(dir, ".env")
 	content := []byte(`
-openlist:
-  url: "http://example:8080"
-  password: "secret123"
-scanner:
-  workers: 16
-  queue_size: 5000
-database:
-  path: "/tmp/test.db"
-tmdb:
-  api_key: "tmdb_key_123"
-  cache_ttl: 3600
-log:
-  level: "debug"
-storage:
-  local_paths:
-    - "/mnt/media"
-  quark_paths:
-    - "/quark/movies"
-  tianyi_paths:
-    - "/tianyi/tv"
+OPENLIST_URL=http://example:8080
+OPENLIST_PASSWORD=secret123
+SCANNER_WORKERS=16
+SCANNER_QUEUE_SIZE=5000
+DATABASE_PATH=/tmp/test.db
+TMDB_API_KEY=tmdb_key_123
+TMDB_CACHE_TTL=3600
+LOG_LEVEL=debug
+STORAGE_LOCAL_PATHS=/mnt/media
+STORAGE_QUARK_PATHS=/quark/movies
+STORAGE_TIANYI_PATHS=/tianyi/tv
 `)
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg, err := LoadFromFile(path)
+	cfg, err := Load(path)
 	if err != nil {
-		t.Fatalf("LoadFromFile failed: %v", err)
+		t.Fatalf("Load failed: %v", err)
 	}
 
 	if cfg.OpenList.URL != "http://example:8080" {
@@ -94,8 +85,21 @@ storage:
 	}
 }
 
-func TestLoadFromFile_NonExistent(t *testing.T) {
-	cfg, err := LoadFromFile("/nonexistent/path/config.yaml")
+func TestLoad_NonExistentEnv(t *testing.T) {
+	// Load with empty path → should get defaults
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("expected nil error for empty path, got: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config from defaults")
+	}
+	if cfg.OpenList.URL != "http://localhost:5244" {
+		t.Errorf("expected default URL, got %s", cfg.OpenList.URL)
+	}
+
+	// Load with non-existent file → should get defaults (no error)
+	cfg, err = Load("/nonexistent/path/.env")
 	if err != nil {
 		t.Fatalf("expected nil error for missing file, got: %v", err)
 	}
@@ -184,12 +188,10 @@ func TestValidate_EmptyDBPath(t *testing.T) {
 
 func TestLoad_FileWithEnvOverride(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
+	path := filepath.Join(dir, ".env")
 	content := []byte(`
-openlist:
-  url: "http://file-value:8080"
-scanner:
-  workers: 8
+OPENLIST_URL=http://file-value:8080
+SCANNER_WORKERS=8
 `)
 	if err := os.WriteFile(path, content, 0644); err != nil {
 		t.Fatal(err)
@@ -207,9 +209,34 @@ scanner:
 	if cfg.OpenList.URL != "http://file-value:8080" {
 		t.Errorf("expected URL from file http://file-value:8080, got %s", cfg.OpenList.URL)
 	}
-	// Env override should win
+	// Env override should win over file value
 	if cfg.Scanner.Workers != 99 {
 		t.Errorf("expected workers from env 99, got %d", cfg.Scanner.Workers)
+	}
+}
+
+func TestLoadEnvFile_QuotedValues(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	content := []byte(`
+OPENLIST_URL="http://quoted:8080"
+OPENLIST_PASSWORD='secret'
+SCANNER_WORKERS=32
+`)
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if cfg.OpenList.URL != "http://quoted:8080" {
+		t.Errorf("expected URL http://quoted:8080, got %s", cfg.OpenList.URL)
+	}
+	if cfg.OpenList.Password != "secret" {
+		t.Errorf("expected password secret, got %s", cfg.OpenList.Password)
 	}
 }
 

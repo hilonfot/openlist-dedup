@@ -75,10 +75,14 @@ func (s *Scanner) Start(ctx context.Context, seeds []ScanTask) {
 		go s.worker(ctx)
 	}
 
-	// Enqueue seed tasks synchronously — fast with a buffered channel
-	for _, task := range seeds {
-		s.taskCh <- task
-	}
+	// Enqueue seed tasks asynchronously to avoid blocking when
+	// len(seeds) > queueSize. Workers are already running, so the
+	// channel will drain as soon as they start consuming.
+	go func() {
+		for _, task := range seeds {
+			s.taskCh <- task
+		}
+	}()
 
 	// Monitor: when all pending tasks are done, signal workers to stop
 	go func() {
@@ -127,6 +131,20 @@ func (s *Scanner) enqueue(ctx context.Context, task ScanTask) bool {
 	}
 }
 
+// drainPending non-blockingly dequeues all tasks from taskCh and decrements
+// pending for each one. This is called by workers when context is cancelled to
+// ensure the pending WaitGroup can reach zero and the monitor can shut down.
+func (s *Scanner) drainPending() {
+	for {
+		select {
+		case <-s.taskCh:
+			s.pending.Done()
+		default:
+			return
+		}
+	}
+}
+
 // worker processes tasks from the task queue.
 func (s *Scanner) worker(ctx context.Context) {
 	defer s.wg.Done()
@@ -134,7 +152,9 @@ func (s *Scanner) worker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// Drain pending so the monitor can proceed
+			// Drain remaining tasks from taskCh so pending can reach zero
+			// and the monitor goroutine can close the channel cleanly.
+			s.drainPending()
 			return
 		case task, ok := <-s.taskCh:
 			if !ok {

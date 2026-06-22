@@ -1,6 +1,7 @@
 package media
 
 import (
+	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode"
@@ -260,12 +261,135 @@ func Normalize(filename string) MediaInfo {
 
 	info.Title = cleaned
 
+	// If the title consists solely of the year number (e.g., "2012.mkv"),
+	// suppress the Year to avoid incorrect TMDB matching. The file is
+	// ambiguous — it might be the movie "2012" or an unrelated file.
+	// TMDB search by name alone works well in this case.
+	if info.Year > 0 && cleaned == itoa(info.Year) {
+		info.Year = 0
+	}
+
 	// If we found an episode tag, format it properly
 	if info.IsEpisode {
 		info.EpisodeTag = formatEpisodeTag(info.Season, info.Episode)
 	}
 
 	return info
+}
+
+// NormalizeWithContext is like Normalize but also uses parent directory names
+// to infer the title when it can't be determined from the filename alone.
+// Parent directories are tried in order: current → parent → grandparent.
+//
+// This is essential for TV episode files like:
+//
+//	Breaking Bad/Season 01/S01E01.mkv → "Breaking Bad" (from grandparent dir)
+func NormalizeWithContext(filename string, parentDirs ...string) MediaInfo {
+	info := Normalize(filename)
+
+	// If title is already available from the filename, use it
+	if info.Title != "" && !looksLikeEpisodeToken(info.Title) {
+		return info
+	}
+
+	// Try parent directories in order (closest first)
+	for _, dir := range parentDirs {
+		dirName := filepath.Base(dir)
+		// Skip season folders — go up one more level
+		if s, ok := parseSeasonFolder(dirName); ok {
+			if info.Season == 0 {
+				info.Season = s
+			}
+			continue
+		}
+		// Try to extract title from this directory name
+		dirInfo := Normalize(dirName)
+		if dirInfo.Title != "" && !looksLikeEpisodeToken(dirInfo.Title) {
+			info.Title = dirInfo.Title
+			if dirInfo.Year > 0 {
+				info.Year = dirInfo.Year
+			}
+			return info
+		}
+	}
+
+	// Last resort: use the first non-empty parent dir name directly
+	for _, dir := range parentDirs {
+		dirName := filepath.Base(dir)
+		if _, ok := parseSeasonFolder(dirName); ok {
+			continue
+		}
+		info.Title = strings.TrimSpace(dirName)
+		return info
+	}
+
+	return info
+}
+
+// looksLikeEpisodeToken returns true if the string looks like an episode
+// format marker (e.g., "s01e01") rather than a real title.
+func looksLikeEpisodeToken(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return true
+	}
+	return reStandardSE.MatchString(s)
+}
+
+// seasonFolderPatterns mirrors the patterns in parseSeasonFolder.
+var seasonFolderPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^[Ss]eason\s+\d+$`),
+	regexp.MustCompile(`^[Ss]\d+$`),
+	regexp.MustCompile(`^第\s*\d+\s*季$`),
+}
+
+// parseSeasonFolder checks if a directory name looks like a season folder
+// (e.g., "Season 1", "S01", "第1季") and returns the season number.
+func parseSeasonFolder(name string) (int, bool) {
+	for _, re := range seasonFolderPatterns {
+		if re.MatchString(name) {
+			digits := regexp.MustCompile(`\d+`).FindString(name)
+			if digits == "" {
+				return 1, true
+			}
+			n := 0
+			for _, r := range digits {
+				n = n*10 + int(r-'0')
+			}
+			return n, true
+		}
+	}
+	// Chinese numeric season: 第一季, 第二季, etc.
+	chinese := regexp.MustCompile(`^第([一二三四五六七八九十百千]+)季$`)
+	if m := chinese.FindStringSubmatch(name); m != nil {
+		return chineseNumber(m[1]), true
+	}
+	return 0, false
+}
+
+// chineseNumber converts a Chinese numeral to an integer.
+func chineseNumber(s string) int {
+	values := map[rune]int{
+		'一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+		'六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+		'百': 100, '千': 1000,
+	}
+	result, unit := 0, 1
+	for _, r := range []rune(s) {
+		if v, ok := values[r]; ok {
+			if v >= 10 {
+				if result == 0 {
+					result = 1
+				}
+				unit *= v
+				result *= v
+				unit = 1
+			} else {
+				result += v * unit
+			}
+		}
+	}
+	return result
 }
 
 // normalizeByYear tries to extract a clean title using the year as a structural

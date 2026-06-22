@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"openlist/internal/config"
 	"openlist/internal/repository"
 )
 
@@ -29,16 +30,23 @@ type Client struct {
 	cache        *repository.DB
 	cacheTTL     time.Duration
 	rateLimit    *time.Ticker
+	mapping      config.MappingTable // optional local fallback mapping
 }
 
 // Config holds TMDB client configuration.
 type Config struct {
-	APIKey      string
-	BaseURL     string // API base URL (e.g. https://api.themoviedb.org/3)
+	APIKey       string
+	BaseURL      string // API base URL (e.g. https://api.themoviedb.org/3)
 	ImageBaseURL string // image base URL (e.g. https://image.tmdb.org/t/p/w500)
-	Cache       *repository.DB
-	CacheTTL    time.Duration
-	RateLimit   int // requests per 10 seconds
+	Cache        *repository.DB
+	CacheTTL     time.Duration
+	RateLimit    int // requests per 10 seconds
+	Mapping      config.MappingTable // optional local fallback mapping
+}
+
+// SetMapping sets the local mapping table for fallback lookups.
+func (c *Client) SetMapping(m config.MappingTable) {
+	c.mapping = m
 }
 
 // New creates a new TMDB client.
@@ -175,6 +183,11 @@ func (c *Client) SearchMovie(ctx context.Context, name string, year int) (*Movie
 		c.saveToCache(ctx, cacheKey(name, year), "movie", result.TMDBID, result)
 	}
 
+	// Fallback: check local mapping
+	if result == nil {
+		result = c.lookupMovieMapping(name, year)
+	}
+
 	return result, nil
 }
 
@@ -221,6 +234,11 @@ func (c *Client) SearchTV(ctx context.Context, name string, season int, year int
 			}
 		}
 		c.saveToCache(ctx, cacheKey(name, year), "tv", result.TMDBID, result)
+	}
+
+	// Fallback: check local mapping
+	if result == nil {
+		result = c.lookupTVMapping(name, season, year)
 	}
 
 	return result, nil
@@ -654,4 +672,40 @@ func searchString(s, substr string) int {
 // similar checks if two strings are approximately equal (one contains the other).
 func similar(a, b string) bool {
 	return contains(a, b) || contains(b, a)
+}
+
+// lookupMovieMapping checks the local mapping table for a movie match.
+func (c *Client) lookupMovieMapping(name string, year int) *MovieResult {
+	if c.mapping == nil {
+		return nil
+	}
+	entry, ok := c.mapping.Lookup(name)
+	if !ok || entry.Type != "movie" {
+		return nil
+	}
+	return &MovieResult{
+		TMDBID:      int64(entry.TMDBID),
+		Title:       name,
+		ReleaseYear: year,
+		TMDBURL:     fmt.Sprintf("https://www.themoviedb.org/movie/%d", entry.TMDBID),
+		FromCache:   false,
+	}
+}
+
+// lookupTVMapping checks the local mapping table for a TV match.
+func (c *Client) lookupTVMapping(name string, season int, year int) *TVResult {
+	if c.mapping == nil {
+		return nil
+	}
+	entry, ok := c.mapping.Lookup(name)
+	if !ok || entry.Type != "tv" {
+		return nil
+	}
+	return &TVResult{
+		TMDBID:       int64(entry.TMDBID),
+		Name:         name,
+		FirstAirYear: year,
+		TMDBURL:      fmt.Sprintf("https://www.themoviedb.org/tv/%d/season/%d", entry.TMDBID, season),
+		FromCache:    false,
+	}
 }

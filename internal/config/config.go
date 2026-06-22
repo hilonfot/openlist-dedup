@@ -1,64 +1,64 @@
 package config
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 )
 
 // Config is the top-level configuration for the OpenList media scanner.
 type Config struct {
-	OpenList OpenListConfig `yaml:"openlist" json:"openlist"`
-	Scanner  ScannerConfig  `yaml:"scanner"  json:"scanner"`
-	Database DatabaseConfig `yaml:"database" json:"database"`
-	TMDB     TMDBConfig     `yaml:"tmdb"     json:"tmdb"`
-	Log      LogConfig      `yaml:"log"      json:"log"`
-	Storage  StorageConfig  `yaml:"storage"  json:"storage"`
+	OpenList OpenListConfig `json:"openlist"`
+	Scanner  ScannerConfig  `json:"scanner"`
+	Database DatabaseConfig `json:"database"`
+	TMDB     TMDBConfig     `json:"tmdb"`
+	Log      LogConfig      `json:"log"`
+	Storage  StorageConfig  `json:"storage"`
 }
 
 // OpenListConfig holds connection settings for the OpenList API.
 type OpenListConfig struct {
-	URL      string `yaml:"url"       env:"OPENLIST_URL"       json:"url"`
-	Username string `yaml:"username"  env:"OPENLIST_USERNAME"  json:"username"`
-	Password string `yaml:"password"  env:"OPENLIST_PASSWORD"  json:"password"`
-	Timeout  int    `yaml:"timeout"   env:"OPENLIST_TIMEOUT"   json:"timeout"`
-	RetryMax int    `yaml:"retry_max" env:"OPENLIST_RETRY_MAX" json:"retry_max"`
+	URL      string `env:"OPENLIST_URL"       json:"url"`
+	Username string `env:"OPENLIST_USERNAME"  json:"username"`
+	Password string `env:"OPENLIST_PASSWORD"  json:"password"`
+	Timeout  int    `env:"OPENLIST_TIMEOUT"   json:"timeout"`
+	RetryMax int    `env:"OPENLIST_RETRY_MAX" json:"retry_max"`
 }
 
 // ScannerConfig holds scan worker pool settings.
 type ScannerConfig struct {
-	Workers   int `yaml:"workers"    env:"SCANNER_WORKERS"    json:"workers"`
-	QueueSize int `yaml:"queue_size" env:"SCANNER_QUEUE_SIZE" json:"queue_size"`
+	Workers   int `env:"SCANNER_WORKERS"    json:"workers"`
+	QueueSize int `env:"SCANNER_QUEUE_SIZE" json:"queue_size"`
 }
 
 // DatabaseConfig holds SQLite database settings.
 type DatabaseConfig struct {
-	Path string `yaml:"path" env:"DATABASE_PATH" json:"path"`
+	Path string `env:"DATABASE_PATH" json:"path"`
 }
 
 // TMDBConfig holds TMDB API settings.
 type TMDBConfig struct {
-	APIKey       string `yaml:"api_key"       env:"TMDB_API_KEY"       json:"api_key"`
-	BaseURL      string `yaml:"base_url"      env:"TMDB_BASE_URL"      json:"base_url"`
-	ImageBaseURL string `yaml:"image_base_url" env:"TMDB_IMAGE_BASE_URL" json:"image_base_url"`
-	CacheTTL     int    `yaml:"cache_ttl"     env:"TMDB_CACHE_TTL"     json:"cache_ttl"`
-	RateLimit    int    `yaml:"rate_limit"    env:"TMDB_RATE_LIMIT"    json:"rate_limit"`
+	APIKey       string `env:"TMDB_API_KEY"        json:"api_key"`
+	BaseURL      string `env:"TMDB_BASE_URL"       json:"base_url"`
+	ImageBaseURL string `env:"TMDB_IMAGE_BASE_URL"  json:"image_base_url"`
+	CacheTTL     int    `env:"TMDB_CACHE_TTL"      json:"cache_ttl"`
+	RateLimit    int    `env:"TMDB_RATE_LIMIT"     json:"rate_limit"`
+	MappingPath  string `env:"TMDB_MAPPING_PATH"   json:"mapping_path"`
 }
 
 // LogConfig holds logging settings.
 type LogConfig struct {
-	Level  string `yaml:"level"  env:"LOG_LEVEL"  json:"level"`
-	Output string `yaml:"output" env:"LOG_OUTPUT" json:"output"`
+	Level  string `env:"LOG_LEVEL"  json:"level"`
+	Output string `env:"LOG_OUTPUT" json:"output"`
 }
 
 // StorageConfig holds scan paths for each storage type.
 type StorageConfig struct {
-	LocalPaths  []string `yaml:"local_paths"  env:"STORAGE_LOCAL_PATHS"  json:"local_paths"`
-	QuarkPaths  []string `yaml:"quark_paths"  env:"STORAGE_QUARK_PATHS"  json:"quark_paths"`
-	TianyiPaths []string `yaml:"tianyi_paths" env:"STORAGE_TIANYI_PATHS" json:"tianyi_paths"`
+	LocalPaths  []string `env:"STORAGE_LOCAL_PATHS"  json:"local_paths"`
+	QuarkPaths  []string `env:"STORAGE_QUARK_PATHS"  json:"quark_paths"`
+	TianyiPaths []string `env:"STORAGE_TIANYI_PATHS" json:"tianyi_paths"`
 }
 
 // DefaultConfig returns a Config populated with sensible defaults.
@@ -79,12 +79,11 @@ func DefaultConfig() *Config {
 			Path: "data/media.db",
 		},
 		TMDB: TMDBConfig{
-				APIKey:       "",
-				BaseURL:      "https://api.themoviedb.org/3",
-				ImageBaseURL: "https://image.tmdb.org/t/p/w500",
-				CacheTTL:     86400,
-				RateLimit:    40,
-			},
+			BaseURL:      "https://api.themoviedb.org/3",
+			ImageBaseURL: "https://image.tmdb.org/t/p/w500",
+			CacheTTL:     86400,
+			RateLimit:    40,
+		},
 		Log: LogConfig{
 			Level:  "info",
 			Output: "stdout",
@@ -97,36 +96,22 @@ func DefaultConfig() *Config {
 	}
 }
 
-// LoadFromFile reads a YAML config file and merges it on top of defaults.
-func LoadFromFile(path string) (*Config, error) {
+// Load reads configuration from a .env file (path), then applies environment
+// variable overrides.  OS env vars take highest precedence.
+func Load(path string) (*Config, error) {
 	cfg := DefaultConfig()
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, nil
+	// Read .env file if it exists (lower precedence than OS env vars)
+	if path != "" {
+		envMap, err := loadEnvFile(path)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("load .env file: %w", err)
 		}
-		return nil, fmt.Errorf("read config file: %w", err)
+		applyEnvMap(cfg, envMap)
 	}
 
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parse config file: %w", err)
-	}
-
-	return cfg, nil
-}
-
-// Load loads config from the given path (if non-empty) then applies
-// environment variable overrides.
-func Load(path string) (*Config, error) {
-	cfg, err := LoadFromFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	// Restore defaults for TMDB fields that YAML or env left empty
-	cfg.applyTMDBDefaults()
-	cfg.applyEnvOverrides()
+	// OS environment variables (highest precedence)
+	applyOSEnv(cfg)
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -138,7 +123,7 @@ func Load(path string) (*Config, error) {
 // Validate checks the config for missing or invalid values.
 func (c *Config) Validate() error {
 	if c.OpenList.URL == "" {
-		return fmt.Errorf("openlist.url is required")
+		return fmt.Errorf("openlist.url is required (set OPENLIST_URL in .env)")
 	}
 	if c.Scanner.Workers <= 0 {
 		return fmt.Errorf("scanner.workers must be > 0")
@@ -147,55 +132,133 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("scanner.queue_size must be > 0")
 	}
 	if c.Database.Path == "" {
-		return fmt.Errorf("database.path is required")
+		return fmt.Errorf("database.path is required (set DATABASE_PATH in .env)")
 	}
 	if c.Log.Level == "" {
-		return fmt.Errorf("log.level is required")
+		return fmt.Errorf("log.level is required (set LOG_LEVEL in .env)")
 	}
 	return nil
 }
 
-// applyEnvOverrides walks the config and replaces fields tagged with `env`
-// when the corresponding environment variable is set.
-// applyTMDBDefaults restores default values for TMDB fields that were set to
-// empty strings by the YAML config (they are intended to come from env vars).
-func (c *Config) applyTMDBDefaults() {
-	if c.TMDB.BaseURL == "" {
-		c.TMDB.BaseURL = "https://api.themoviedb.org/3"
+// loadEnvFile reads a .env file and returns a map of KEY=VALUE pairs.
+// Lines starting with # are treated as comments.  Empty lines are skipped.
+func loadEnvFile(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
-	if c.TMDB.ImageBaseURL == "" {
-		c.TMDB.ImageBaseURL = "https://image.tmdb.org/t/p/w500"
+	defer f.Close()
+
+	result := make(map[string]string)
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Split on first '=' only — values may contain '='
+		idx := strings.IndexByte(line, '=')
+		if idx < 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:idx])
+		val := strings.TrimSpace(line[idx+1:])
+		// Remove surrounding quotes if present
+		if len(val) >= 2 {
+			if (val[0] == '"' && val[len(val)-1] == '"') ||
+				(val[0] == '\'' && val[len(val)-1] == '\'') {
+				val = val[1 : len(val)-1]
+			}
+		}
+		if key != "" {
+			result[key] = val
+		}
+	}
+	return result, sc.Err()
+}
+
+// applyEnvMap applies values from a .env file map to the config struct.
+func applyEnvMap(cfg *Config, m map[string]string) {
+	if m == nil {
+		return
+	}
+	// Helper closures
+	strVal := func(target *string, key string) {
+		if v, ok := m[key]; ok {
+			*target = v
+		}
+	}
+	intVal := func(target *int, key string) {
+		if v, ok := m[key]; ok {
+			if n, err := strconv.Atoi(v); err == nil {
+				*target = n
+			}
+		}
+	}
+
+	strVal(&cfg.OpenList.URL, "OPENLIST_URL")
+	strVal(&cfg.OpenList.Username, "OPENLIST_USERNAME")
+	strVal(&cfg.OpenList.Password, "OPENLIST_PASSWORD")
+	intVal(&cfg.OpenList.Timeout, "OPENLIST_TIMEOUT")
+	intVal(&cfg.OpenList.RetryMax, "OPENLIST_RETRY_MAX")
+
+	intVal(&cfg.Scanner.Workers, "SCANNER_WORKERS")
+	intVal(&cfg.Scanner.QueueSize, "SCANNER_QUEUE_SIZE")
+
+	strVal(&cfg.Database.Path, "DATABASE_PATH")
+
+	strVal(&cfg.TMDB.APIKey, "TMDB_API_KEY")
+	strVal(&cfg.TMDB.BaseURL, "TMDB_BASE_URL")
+	strVal(&cfg.TMDB.ImageBaseURL, "TMDB_IMAGE_BASE_URL")
+	intVal(&cfg.TMDB.CacheTTL, "TMDB_CACHE_TTL")
+	intVal(&cfg.TMDB.RateLimit, "TMDB_RATE_LIMIT")
+	strVal(&cfg.TMDB.MappingPath, "TMDB_MAPPING_PATH")
+
+	strVal(&cfg.Log.Level, "LOG_LEVEL")
+	strVal(&cfg.Log.Output, "LOG_OUTPUT")
+
+	if v, ok := m["STORAGE_LOCAL_PATHS"]; ok {
+		cfg.Storage.LocalPaths = splitEnv(v)
+	}
+	if v, ok := m["STORAGE_QUARK_PATHS"]; ok {
+		cfg.Storage.QuarkPaths = splitEnv(v)
+	}
+	if v, ok := m["STORAGE_TIANYI_PATHS"]; ok {
+		cfg.Storage.TianyiPaths = splitEnv(v)
 	}
 }
-func (c *Config) applyEnvOverrides() {
-	override(&c.OpenList.URL, os.Getenv("OPENLIST_URL"))
-	override(&c.OpenList.Username, os.Getenv("OPENLIST_USERNAME"))
-	override(&c.OpenList.Password, os.Getenv("OPENLIST_PASSWORD"))
-	overrideStringToInt(&c.OpenList.Timeout, os.Getenv("OPENLIST_TIMEOUT"))
-	overrideStringToInt(&c.OpenList.RetryMax, os.Getenv("OPENLIST_RETRY_MAX"))
 
-	overrideStringToInt(&c.Scanner.Workers, os.Getenv("SCANNER_WORKERS"))
-	overrideStringToInt(&c.Scanner.QueueSize, os.Getenv("SCANNER_QUEUE_SIZE"))
+// applyOSEnv applies overrides from OS environment variables (highest priority).
+func applyOSEnv(cfg *Config) {
+	override(&cfg.OpenList.URL, os.Getenv("OPENLIST_URL"))
+	override(&cfg.OpenList.Username, os.Getenv("OPENLIST_USERNAME"))
+	override(&cfg.OpenList.Password, os.Getenv("OPENLIST_PASSWORD"))
+	overrideStringToInt(&cfg.OpenList.Timeout, os.Getenv("OPENLIST_TIMEOUT"))
+	overrideStringToInt(&cfg.OpenList.RetryMax, os.Getenv("OPENLIST_RETRY_MAX"))
 
-	override(&c.Database.Path, os.Getenv("DATABASE_PATH"))
+	overrideStringToInt(&cfg.Scanner.Workers, os.Getenv("SCANNER_WORKERS"))
+	overrideStringToInt(&cfg.Scanner.QueueSize, os.Getenv("SCANNER_QUEUE_SIZE"))
 
-	override(&c.TMDB.APIKey, os.Getenv("TMDB_API_KEY"))
-	override(&c.TMDB.BaseURL, os.Getenv("TMDB_BASE_URL"))
-	override(&c.TMDB.ImageBaseURL, os.Getenv("TMDB_IMAGE_BASE_URL"))
-	overrideStringToInt(&c.TMDB.CacheTTL, os.Getenv("TMDB_CACHE_TTL"))
-	overrideStringToInt(&c.TMDB.RateLimit, os.Getenv("TMDB_RATE_LIMIT"))
+	override(&cfg.Database.Path, os.Getenv("DATABASE_PATH"))
 
-	override(&c.Log.Level, os.Getenv("LOG_LEVEL"))
-	override(&c.Log.Output, os.Getenv("LOG_OUTPUT"))
+	override(&cfg.TMDB.APIKey, os.Getenv("TMDB_API_KEY"))
+	override(&cfg.TMDB.BaseURL, os.Getenv("TMDB_BASE_URL"))
+	override(&cfg.TMDB.ImageBaseURL, os.Getenv("TMDB_IMAGE_BASE_URL"))
+	overrideStringToInt(&cfg.TMDB.CacheTTL, os.Getenv("TMDB_CACHE_TTL"))
+	overrideStringToInt(&cfg.TMDB.RateLimit, os.Getenv("TMDB_RATE_LIMIT"))
+	override(&cfg.TMDB.MappingPath, os.Getenv("TMDB_MAPPING_PATH"))
+
+	override(&cfg.Log.Level, os.Getenv("LOG_LEVEL"))
+	override(&cfg.Log.Output, os.Getenv("LOG_OUTPUT"))
 
 	if env := os.Getenv("STORAGE_LOCAL_PATHS"); env != "" {
-		c.Storage.LocalPaths = splitEnv(env)
+		cfg.Storage.LocalPaths = splitEnv(env)
 	}
 	if env := os.Getenv("STORAGE_QUARK_PATHS"); env != "" {
-		c.Storage.QuarkPaths = splitEnv(env)
+		cfg.Storage.QuarkPaths = splitEnv(env)
 	}
 	if env := os.Getenv("STORAGE_TIANYI_PATHS"); env != "" {
-		c.Storage.TianyiPaths = splitEnv(env)
+		cfg.Storage.TianyiPaths = splitEnv(env)
 	}
 }
 
@@ -214,7 +277,7 @@ func overrideStringToInt(target *int, value string) {
 	}
 }
 
-// splitEnv splits a comma-separated environment variable value.
+// splitEnv splits a comma-separated string value.
 func splitEnv(s string) []string {
 	parts := strings.Split(s, ",")
 	result := make([]string, 0, len(parts))

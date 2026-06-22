@@ -1,0 +1,50 @@
+# 影视名称 → TMDB ID 本地映射表
+# 用于 TMDB 搜索失败时的 fallback，特别针对国产影视和网盘资源名。
+# 格式:
+#   <规范化名称>:
+#     tmdb_id: <TMDB ID>
+#     type: movie | tv
+#     title: <显示名称>  # 可选
+
+# === 电影 ===
+流浪地球2:
+  tmdb_id: 842675
+  type: movie
+流浪地球:
+  tmdb_id: 535167
+  type: movie
+你好李焕英:
+  tmdb_id: 788316
+  type: movie
+长津湖:
+  tmdb_id: 928729
+  type: movie
+战狼2:
+  tmdb_id: 460567
+  type: movie
+哪吒之魔童降世:
+  tmdb_id: 531499
+  type: movie
+满江红:
+  tmdb_id: 1005052
+  type: movie
+
+# === 电视剧 ===
+庆余年:
+  tmdb_id: 94307
+  type: tv
+繁花:
+  tmdb_id: 237698
+  type: tv
+琅琊榜:
+  tmdb_id: 63582
+  type: tv
+漫长的季节:
+  tmdb_id: 228547
+  type: tv
+三体:
+  tmdb_id: 126254
+  type: tv
+狂飙:
+  tmdb_id: 226467
+  type: tv

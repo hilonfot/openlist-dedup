@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -26,6 +28,7 @@ type Client struct {
 	token      string
 	httpClient *http.Client
 	retryMax   int
+	mu         sync.Mutex // protects token field during refresh
 }
 
 // New creates a new OpenList client.
@@ -74,12 +77,15 @@ func (c *Client) Login(ctx context.Context) error {
 		return fmt.Errorf("login: empty token in response")
 	}
 
+	c.mu.Lock()
 	c.token = resp.Token
+	c.mu.Unlock()
 	return nil
 }
 
 // request sends an authenticated POST request to the given path, retrying on
-// retryable errors with exponential backoff.
+// retryable errors with exponential backoff. If the token is expired (401), it
+// attempts a single re-login and retry.
 func (c *Client) request(ctx context.Context, apiPath string, reqBody, respBody interface{}) error {
 	var lastErr error
 
@@ -87,6 +93,19 @@ func (c *Client) request(ctx context.Context, apiPath string, reqBody, respBody 
 		lastErr = c.doRequest(ctx, apiPath, reqBody, respBody)
 		if lastErr == nil {
 			return nil
+		}
+
+		// On 401 with token-based auth, try re-login once
+		if errors.Is(lastErr, ErrAuth) && c.username != "" {
+			if reloginErr := c.reLogin(ctx); reloginErr == nil {
+				// Retry the original request with the new token
+				lastErr = c.doRequest(ctx, apiPath, reqBody, respBody)
+				if lastErr == nil {
+					return nil
+				}
+			}
+			// Re-login failed or retry still failed; don't keep trying
+			return lastErr
 		}
 
 		// Only retry on retryable errors
@@ -108,6 +127,32 @@ func (c *Client) request(ctx context.Context, apiPath string, reqBody, respBody 
 	return lastErr
 }
 
+// reLogin attempts a fresh login and stores the new token. It serializes
+// concurrent callers to avoid thundering-herd logins.
+func (c *Client) reLogin(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Double-check: another goroutine may have already refreshed
+	reqBody := map[string]string{
+		"username": c.username,
+		"password": c.password,
+	}
+
+	var resp loginResponse
+	// Use doRequest directly — no retry loop, no re-login recursion
+	if err := c.doRequest(ctx, "/api/auth/login", reqBody, &resp); err != nil {
+		return err
+	}
+
+	if resp.Token == "" {
+		return fmt.Errorf("re-login: empty token in response")
+	}
+
+	c.token = resp.Token
+	return nil
+}
+
 // doRequest performs a single HTTP request.
 func (c *Client) doRequest(ctx context.Context, apiPath string, reqBody, respBody interface{}) error {
 	body, err := json.Marshal(reqBody)
@@ -122,8 +167,11 @@ func (c *Client) doRequest(ctx context.Context, apiPath string, reqBody, respBod
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if c.token != "" {
-		req.Header.Set("Authorization", c.token)
+	c.mu.Lock()
+	token := c.token
+	c.mu.Unlock()
+	if token != "" {
+		req.Header.Set("Authorization", token)
 	}
 
 	resp, err := c.httpClient.Do(req)
