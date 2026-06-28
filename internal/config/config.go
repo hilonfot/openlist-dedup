@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -125,6 +126,17 @@ func (c *Config) Validate() error {
 	if c.OpenList.URL == "" {
 		return fmt.Errorf("openlist.url is required (set OPENLIST_URL in .env)")
 	}
+	if u, err := url.Parse(c.OpenList.URL); err != nil {
+		return fmt.Errorf("openlist.url is not a valid URL: %w", err)
+	} else if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("openlist.url must use http or https scheme, got %q", u.Scheme)
+	}
+	if c.OpenList.Timeout <= 0 {
+		return fmt.Errorf("openlist.timeout must be > 0 seconds")
+	}
+	if c.OpenList.RetryMax < 0 {
+		return fmt.Errorf("openlist.retry_max must be >= 0")
+	}
 	if c.Scanner.Workers <= 0 {
 		return fmt.Errorf("scanner.workers must be > 0")
 	}
@@ -134,8 +146,19 @@ func (c *Config) Validate() error {
 	if c.Database.Path == "" {
 		return fmt.Errorf("database.path is required (set DATABASE_PATH in .env)")
 	}
+	if c.TMDB.CacheTTL < 0 {
+		return fmt.Errorf("tmdb.cache_ttl must be >= 0")
+	}
+	if c.TMDB.RateLimit < 0 {
+		return fmt.Errorf("tmdb.rate_limit must be >= 0")
+	}
 	if c.Log.Level == "" {
 		return fmt.Errorf("log.level is required (set LOG_LEVEL in .env)")
+	}
+	switch strings.ToLower(c.Log.Level) {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("log.level must be one of debug/info/warn/error, got %q", c.Log.Level)
 	}
 	return nil
 }

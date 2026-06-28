@@ -60,23 +60,29 @@ type DB struct {
 // Open opens or creates the SQLite database at the given path and applies
 // the schema. The path ":memory:" creates an in-memory database.
 func Open(path string) (*DB, error) {
-	db, err := sql.Open("sqlite", path)
+	// Apply pragmas via the DSN so they take effect on *every* pooled
+	// connection. busy_timeout/synchronous/foreign_keys are per-connection
+	// settings; running them once via db.Exec would only configure whichever
+	// connection happened to serve that call, leaving later connections with
+	// SQLite defaults (busy_timeout=0 → spurious SQLITE_BUSY under concurrency).
+	const pragmas = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)"
+
+	memory := path == ":memory:"
+	dsn := "file:" + path + "?" + pragmas
+	if memory {
+		dsn = "file::memory:?" + pragmas
+	}
+
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	// Performance pragmas for SQLite
-	pragmas := []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA synchronous=NORMAL",
-		"PRAGMA busy_timeout=5000",
-		"PRAGMA foreign_keys=ON",
-	}
-	for _, p := range pragmas {
-		if _, err := db.Exec(p); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("set pragma: %w", err)
-		}
+	if memory {
+		// An in-memory database lives entirely within a single connection;
+		// pin the pool to one connection so every query observes the same DB.
+		db.SetMaxOpenConns(1)
 	}
 
 	w := &DB{DB: db}

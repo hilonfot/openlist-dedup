@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 )
 
@@ -124,22 +123,4 @@ func (db *DB) DeleteCompletedTasks(ctx context.Context) error {
 		DELETE FROM scan_tasks WHERE status = ?
 	`, TaskStatusCompleted)
 	return err
-}
-
-// scanSqlRow is an interface that both *sql.Row and *sql.Rows implement for scanning.
-type scanSqlRow interface {
-	Scan(dest ...interface{}) error
-}
-
-// scanScanTask scans a single scan task row.
-func scanScanTask(row scanSqlRow) (*ScanTask, error) {
-	var t ScanTask
-	err := row.Scan(&t.ID, &t.Storage, &t.Path, &t.Status, &t.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("scan scan_task: %w", err)
-	}
-	return &t, nil
 }

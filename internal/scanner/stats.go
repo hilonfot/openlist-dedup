@@ -66,7 +66,7 @@ func (s *Stats) Snapshot() StatsSnapshot {
 	}
 
 	return StatsSnapshot{
-		Directories:     s.directories,
+		Directories:     atomic.LoadInt64(&s.directories),
 		Files:           files,
 		Elapsed:         elapsed,
 		CurrentSpeed:    s.currentSpeed,

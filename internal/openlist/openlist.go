@@ -42,6 +42,9 @@ type removeRequest struct {
 
 // --- API Methods ---
 
+// listPerPage is the page size used when paginating directory listings.
+const listPerPage = 1000
+
 // List returns the contents of a directory. For directories with many entries,
 // it paginates through all pages automatically.
 func (c *Client) List(ctx context.Context, path string) (*ListResult, error) {
@@ -49,7 +52,7 @@ func (c *Client) List(ctx context.Context, path string) (*ListResult, error) {
 		Path:     path,
 		Password: c.password,
 		Page:     1,
-		PerPage:  0,
+		PerPage:  listPerPage,
 		Refresh:  false,
 	}
 
@@ -58,7 +61,11 @@ func (c *Client) List(ctx context.Context, path string) (*ListResult, error) {
 		return nil, err
 	}
 
-	// Handle pagination if total > returned content
+	// Handle pagination if total > returned content. Stop early if a page
+	// returns no new entries, so a stale or inconsistent Total can never cause
+	// an infinite request loop. (Any non-empty page grows allContent, so the
+	// length condition is guaranteed to terminate; only a zero-progress page
+	// could loop forever, which the break below prevents.)
 	allContent := make([]FileInfo, 0, result.Total)
 	allContent = append(allContent, result.Content...)
 
@@ -67,6 +74,11 @@ func (c *Client) List(ctx context.Context, path string) (*ListResult, error) {
 		var pageResult ListResult
 		if err := c.request(ctx, "/api/fs/list", &req, &pageResult); err != nil {
 			return nil, err
+		}
+		if len(pageResult.Content) == 0 {
+			// Server reported more entries than it actually returns; stop rather
+			// than loop forever.
+			break
 		}
 		allContent = append(allContent, pageResult.Content...)
 	}

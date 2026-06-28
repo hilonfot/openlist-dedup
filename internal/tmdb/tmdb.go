@@ -7,11 +7,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
 	"openlist/internal/config"
+	"openlist/internal/logger"
 	"openlist/internal/repository"
 )
 
@@ -31,6 +31,7 @@ type Client struct {
 	cacheTTL     time.Duration
 	rateLimit    *time.Ticker
 	mapping      config.MappingTable // optional local fallback mapping
+	logger       *logger.Logger
 }
 
 // Config holds TMDB client configuration.
@@ -40,8 +41,9 @@ type Config struct {
 	ImageBaseURL string // image base URL (e.g. https://image.tmdb.org/t/p/w500)
 	Cache        *repository.DB
 	CacheTTL     time.Duration
-	RateLimit    int // requests per 10 seconds
+	RateLimit    int                 // requests per 10 seconds
 	Mapping      config.MappingTable // optional local fallback mapping
+	Logger       *logger.Logger      // optional; defaults to a discard logger
 }
 
 // SetMapping sets the local mapping table for fallback lookups.
@@ -65,6 +67,13 @@ func New(cfg Config) *Client {
 
 	interval := (10 * time.Second) / time.Duration(rateLimit)
 
+	log := cfg.Logger
+	if log == nil {
+		// No logger supplied (e.g. in tests): discard structured output rather
+		// than writing to stderr.
+		log = logger.New("error", io.Discard)
+	}
+
 	return &Client{
 		apiKey:      cfg.APIKey,
 		baseURL:     baseURL,
@@ -75,6 +84,7 @@ func New(cfg Config) *Client {
 		cache:     cfg.Cache,
 		cacheTTL:  cfg.CacheTTL,
 		rateLimit: time.NewTicker(interval),
+		logger:    log,
 	}
 }
 
@@ -142,12 +152,12 @@ type TVResult struct {
 func (c *Client) SearchMovie(ctx context.Context, name string, year int) (*MovieResult, error) {
 	// Check cache first
 	if c.cache != nil {
-		result, err := c.searchMovieCached(ctx, name, "movie", year)
+		result, cached, err := c.searchMovieCached(ctx, name, "movie", year)
 		if err != nil {
 			return nil, err
 		}
-		if result != nil {
-			return result, nil
+		if cached {
+			return result, nil // result may be nil for a remembered miss
 		}
 	}
 
@@ -188,6 +198,11 @@ func (c *Client) SearchMovie(ctx context.Context, name string, year int) (*Movie
 		result = c.lookupMovieMapping(name, year)
 	}
 
+	// Remember misses so an unmatchable name is not re-queried every run.
+	if result == nil && c.cache != nil {
+		c.saveMissToCache(ctx, cacheKey(name, year), "movie")
+	}
+
 	return result, nil
 }
 
@@ -195,12 +210,12 @@ func (c *Client) SearchMovie(ctx context.Context, name string, year int) (*Movie
 func (c *Client) SearchTV(ctx context.Context, name string, season int, year int) (*TVResult, error) {
 	// Check cache first
 	if c.cache != nil {
-		result, err := c.searchTVCached(ctx, name, "tv", season, year)
+		result, cached, err := c.searchTVCached(ctx, name, "tv", season, year)
 		if err != nil {
 			return nil, err
 		}
-		if result != nil {
-			return result, nil
+		if cached {
+			return result, nil // result may be nil for a remembered miss
 		}
 	}
 
@@ -210,7 +225,7 @@ func (c *Client) SearchTV(ctx context.Context, name string, season int, year int
 		return nil, err
 	}
 	if result != nil {
-		c.saveToCache(ctx, cacheKey(name, year), "tv", result.TMDBID, result)
+		c.saveToCache(ctx, tvCacheKey(name, season, year), "tv", result.TMDBID, result)
 		return result, nil
 	}
 
@@ -233,12 +248,17 @@ func (c *Client) SearchTV(ctx context.Context, name string, season int, year int
 				result.PosterURL = c.posterURL(details.PosterPath)
 			}
 		}
-		c.saveToCache(ctx, cacheKey(name, year), "tv", result.TMDBID, result)
+		c.saveToCache(ctx, tvCacheKey(name, season, year), "tv", result.TMDBID, result)
 	}
 
 	// Fallback: check local mapping
 	if result == nil {
 		result = c.lookupTVMapping(name, season, year)
+	}
+
+	// Remember misses so an unmatchable name is not re-queried every run.
+	if result == nil && c.cache != nil {
+		c.saveMissToCache(ctx, tvCacheKey(name, season, year), "tv")
 	}
 
 	return result, nil
@@ -513,56 +533,79 @@ func (c *Client) bestTVMatch(results []SearchResult, query string, season int, y
 
 // --- Cache helpers ---
 
-func (c *Client) searchMovieCached(ctx context.Context, name, mediaType string, year int) (*MovieResult, error) {
+// cacheMissSentinel is stored in the data column to remember that a name
+// produced no TMDB match, so repeated lookups of an unmatchable filename don't
+// re-hit the API on every run.
+const cacheMissSentinel = "__MISS__"
+
+// searchMovieCached looks up a cached movie result. The returned cached flag is
+// true when any entry exists (positive or negative); when cached is true and
+// result is nil, the name is known to have no match and the API can be skipped.
+func (c *Client) searchMovieCached(ctx context.Context, name, mediaType string, year int) (result *MovieResult, cached bool, err error) {
 	cacheKey := cacheKey(name, year)
 	entry, err := c.cache.GetTMDBCache(ctx, cacheKey, mediaType, c.cacheTTL)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if entry == nil {
-		return nil, nil
+		return nil, false, nil
+	}
+	if entry.Data == cacheMissSentinel {
+		return nil, true, nil // negative cache hit
 	}
 
-	var result MovieResult
-	if err := json.Unmarshal([]byte(entry.Data), &result); err != nil {
-		return nil, nil // treat corrupt cache as miss
+	var r MovieResult
+	if err := json.Unmarshal([]byte(entry.Data), &r); err != nil {
+		return nil, false, nil // treat corrupt cache as miss
 	}
-	result.FromCache = true
-	return &result, nil
+	r.FromCache = true
+	return &r, true, nil
 }
 
-func (c *Client) searchTVCached(ctx context.Context, name, mediaType string, season int, year int) (*TVResult, error) {
-	cacheKey := cacheKey(name, year)
+func (c *Client) searchTVCached(ctx context.Context, name, mediaType string, season int, year int) (result *TVResult, cached bool, err error) {
+	cacheKey := tvCacheKey(name, season, year)
 	entry, err := c.cache.GetTMDBCache(ctx, cacheKey, mediaType, c.cacheTTL)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if entry == nil {
-		return nil, nil
+		return nil, false, nil
+	}
+	if entry.Data == cacheMissSentinel {
+		return nil, true, nil // negative cache hit
 	}
 
-	var result TVResult
-	if err := json.Unmarshal([]byte(entry.Data), &result); err != nil {
-		return nil, nil
+	var r TVResult
+	if err := json.Unmarshal([]byte(entry.Data), &r); err != nil {
+		return nil, false, nil
 	}
-	result.FromCache = true
-	return &result, nil
+	r.FromCache = true
+	return &r, true, nil
 }
 
 func (c *Client) saveToCache(ctx context.Context, name, mediaType string, tmdbID int64, data interface{}) {
 	if c.cache == nil {
-		fmt.Fprintf(os.Stderr, "TMDB: cache is nil, cannot save %s\n", name)
 		return
 	}
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "TMDB: marshal error for %s: %v\n", name, err)
+		c.logger.Warn("TMDB cache marshal failed", "name", name, "error", err)
 		return
 	}
 	if err := c.cache.SaveTMDBCache(ctx, name, mediaType, tmdbID, string(jsonData)); err != nil {
-		fmt.Fprintf(os.Stderr, "TMDB: save error for %s: %v\n", name, err)
-	} else {
-		fmt.Fprintf(os.Stderr, "TMDB: saved %s (%s, id=%d, %d bytes)\n", name, mediaType, tmdbID, len(jsonData))
+		c.logger.Warn("TMDB cache save failed", "name", name, "error", err)
+	}
+}
+
+// saveMissToCache records a negative cache entry so an unmatchable name is not
+// re-queried against the TMDB API on every run. The miss expires under the same
+// TTL as positive entries.
+func (c *Client) saveMissToCache(ctx context.Context, name, mediaType string) {
+	if c.cache == nil {
+		return
+	}
+	if err := c.cache.SaveTMDBCache(ctx, name, mediaType, 0, cacheMissSentinel); err != nil {
+		c.logger.Warn("TMDB negative-cache save failed", "name", name, "error", err)
 	}
 }
 
@@ -574,6 +617,17 @@ func cacheKey(name string, year int) string {
 		return fmt.Sprintf("%s (%d)", name, year)
 	}
 	return name
+}
+
+// tvCacheKey extends cacheKey with the season so that different seasons of the
+// same show (which TMDB resolves to different results) do not collide on a
+// single cache entry.
+func tvCacheKey(name string, season int, year int) string {
+	key := cacheKey(name, year)
+	if season > 0 {
+		return fmt.Sprintf("%s S%02d", key, season)
+	}
+	return key
 }
 
 // posterURL constructs a full TMDB image URL from a poster path.

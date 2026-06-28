@@ -23,6 +23,20 @@ const folderLevelTag = "__FOLDER__"
 
 var storagePriority = []string{"local", "tianyi", "quark"}
 
+// Package-level compiled regexps. These are matched once per file during
+// detection, so compiling them lazily inside the helper functions would
+// recompile on every call — hoist them here to compile exactly once.
+var (
+	reEpisodeToken     = regexp.MustCompile(`^s\d{1,2}e\d{1,3}$`)
+	reDigits           = regexp.MustCompile(`\d+`)
+	reChineseSeason    = regexp.MustCompile(`^第([一二三四五六七八九十百千]+)季$`)
+	seasonFolderRegexp = []*regexp.Regexp{
+		regexp.MustCompile(`^[Ss]eason\s+\d+$`),
+		regexp.MustCompile(`^[Ss]\d+$`),
+		regexp.MustCompile(`^第\s*\d+\s*季$`),
+	}
+)
+
 type FileEntry struct {
 	ID       int64
 	Storage  string
@@ -378,7 +392,7 @@ func folderTitle(e FileEntry, fallbackYear int) (string, int) {
 
 func looksLikeEpisodeToken(title string) bool {
 	t := strings.ToLower(strings.TrimSpace(title))
-	return t == "" || regexp.MustCompile(`^s\d{1,2}e\d{1,3}$`).MatchString(t)
+	return t == "" || reEpisodeToken.MatchString(t)
 }
 
 // isBareNumberFile checks if a filename is a bare number (e.g., "01.mkv", "02.mp4").
@@ -443,28 +457,6 @@ func seasonFromPath(path string) int {
 
 func formatEpisodeTag(season, episode int) string {
 	return fmt.Sprintf("S%02dE%02d", season, episode)
-}
-
-func (d *Detector) verifyBySize(files []FileEntry) []FileEntry {
-	if len(files) < 2 {
-		return files
-	}
-	matched := make(map[int64]bool)
-	for i := 0; i < len(files); i++ {
-		for j := i + 1; j < len(files); j++ {
-			if sizeWithinTolerance(files[i].Size, files[j].Size) {
-				matched[files[i].ID] = true
-				matched[files[j].ID] = true
-			}
-		}
-	}
-	var result []FileEntry
-	for _, f := range files {
-		if matched[f.ID] {
-			result = append(result, f)
-		}
-	}
-	return result
 }
 
 func (d *Detector) clusterBySize(files []FileEntry) ([][]FileEntry, []FileEntry) {
@@ -614,14 +606,9 @@ func isSeasonFolder(name string) bool {
 }
 
 func parseSeasonFolder(name string) (int, bool) {
-	patterns := []*regexp.Regexp{
-		regexp.MustCompile(`^[Ss]eason\s+\d+$`),
-		regexp.MustCompile(`^[Ss]\d+$`),
-		regexp.MustCompile(`^第\s*\d+\s*季$`),
-	}
-	for _, re := range patterns {
+	for _, re := range seasonFolderRegexp {
 		if re.MatchString(name) {
-			digits := regexp.MustCompile(`\d+`).FindString(name)
+			digits := reDigits.FindString(name)
 			if digits == "" {
 				return 1, true
 			}
@@ -632,8 +619,7 @@ func parseSeasonFolder(name string) (int, bool) {
 			return n, true
 		}
 	}
-	chinese := regexp.MustCompile(`^第([一二三四五六七八九十百千]+)季$`)
-	if m := chinese.FindStringSubmatch(name); m != nil {
+	if m := reChineseSeason.FindStringSubmatch(name); m != nil {
 		return chineseNumber(m[1]), true
 	}
 	return 0, false

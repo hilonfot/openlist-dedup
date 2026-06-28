@@ -93,6 +93,17 @@ func (e *Executor) CreatePlan(groups []duplicate.DuplicateGroup) Plan {
 	var deleteCount int
 
 	for _, g := range groups {
+		// Safety invariant: every group must retain at least one file. If the
+		// detector somehow marked every file in a group for deletion, fall back
+		// to keeping all of them rather than wiping the only copies.
+		keepCount := 0
+		for _, f := range g.Files {
+			if f.Decision != duplicate.Delete {
+				keepCount++
+			}
+		}
+		forceKeep := keepCount == 0 && len(g.Files) > 0
+
 		for _, f := range g.Files {
 			entry := PlanEntry{
 				FileID:  f.ID,
@@ -103,12 +114,15 @@ func (e *Executor) CreatePlan(groups []duplicate.DuplicateGroup) Plan {
 				Reason:  fmt.Sprintf("duplicate of %s in group %s", f.Storage, g.NormalizedName),
 			}
 
-			if f.Decision == duplicate.Delete {
+			if f.Decision == duplicate.Delete && !forceKeep {
 				entry.Action = ActionDelete
 				deleteCount++
 				savedSpace += f.Size
 			} else {
 				entry.Action = ActionKeep
+				if forceKeep {
+					entry.Reason = "kept: group would otherwise lose all copies"
+				}
 			}
 
 			entries = append(entries, entry)
@@ -180,7 +194,30 @@ func (e *Executor) Execute(ctx context.Context, plan Plan) (ExecutionResult, err
 			continue
 		}
 
-		// Real deletion
+		// Real deletion. Verify the file still matches the plan before removing
+		// it: the plan may have been generated in an earlier run and the file
+		// could have been moved, replaced, or resized since. Deletion is
+		// permanent, so a mismatch must abort this entry rather than risk
+		// removing the wrong content.
+		info, err := e.client.Get(ctx, entry.Path)
+		if err != nil {
+			result.Failed++
+			result.Errors = append(result.Errors, DeleteError{
+				Path:  entry.Path,
+				Error: fmt.Sprintf("verify before delete: %v", err),
+			})
+			continue
+		}
+		if info.IsDir || info.Size != entry.Size {
+			result.Failed++
+			result.Errors = append(result.Errors, DeleteError{
+				Path: entry.Path,
+				Error: fmt.Sprintf("stale plan: file changed (is_dir=%t, size %d != expected %d), skipped",
+					info.IsDir, info.Size, entry.Size),
+			})
+			continue
+		}
+
 		if err := e.client.Delete(ctx, entry.Path); err != nil {
 			result.Failed++
 			result.Errors = append(result.Errors, DeleteError{

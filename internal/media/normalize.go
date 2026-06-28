@@ -184,6 +184,19 @@ var qualityPatterns = []string{
 	"SUBBED",
 }
 
+// qualityPatternsLower is the lowercased form of qualityPatterns, precomputed
+// once at init so removeQualityTags does not lowercase each pattern on every
+// call.
+var qualityPatternsLower = lowerAll(qualityPatterns)
+
+func lowerAll(in []string) []string {
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[i] = strings.ToLower(s)
+	}
+	return out
+}
+
 // releaseYearRange defines the acceptable range for a release year anchor.
 const (
 	releaseYearMin = 1900
@@ -209,6 +222,12 @@ var (
 
 	// Year pattern: (2024) or [2024] or 2024 — used to separate year from title
 	reYear = regexp.MustCompile(`[\(\[]?(\d{4})[\)\]]?`)
+
+	// Bracketed metadata to strip (Chinese/CJK and ASCII brackets)
+	reBrackets = regexp.MustCompile(`[【\[〖《][^】\]〗》]+[】\]〗》]`)
+
+	// Standalone resolution indicators (480/720/1080/2160)
+	reStandaloneQuality = regexp.MustCompile(`\b(480|720|1080|2160)\b`)
 )
 
 // Normalize cleans a media file name and extracts episode information.
@@ -343,12 +362,18 @@ var seasonFolderPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^第\s*\d+\s*季$`),
 }
 
+// Compiled once; used per-file inside parseSeasonFolder.
+var (
+	reSeasonDigits  = regexp.MustCompile(`\d+`)
+	reChineseSeason = regexp.MustCompile(`^第([一二三四五六七八九十百千]+)季$`)
+)
+
 // parseSeasonFolder checks if a directory name looks like a season folder
 // (e.g., "Season 1", "S01", "第1季") and returns the season number.
 func parseSeasonFolder(name string) (int, bool) {
 	for _, re := range seasonFolderPatterns {
 		if re.MatchString(name) {
-			digits := regexp.MustCompile(`\d+`).FindString(name)
+			digits := reSeasonDigits.FindString(name)
 			if digits == "" {
 				return 1, true
 			}
@@ -360,8 +385,7 @@ func parseSeasonFolder(name string) (int, bool) {
 		}
 	}
 	// Chinese numeric season: 第一季, 第二季, etc.
-	chinese := regexp.MustCompile(`^第([一二三四五六七八九十百千]+)季$`)
-	if m := chinese.FindStringSubmatch(name); m != nil {
+	if m := reChineseSeason.FindStringSubmatch(name); m != nil {
 		return chineseNumber(m[1]), true
 	}
 	return 0, false
@@ -491,8 +515,7 @@ func normalizeSeparators(name string) string {
 // contains supplementary metadata (Chinese tags, format notes, group names, etc.)
 // that should not be part of the normalized title.
 func removeBrackets(name string) string {
-	re := regexp.MustCompile(`[【\[〖《][^】\]〗》]+[】\]〗》]`)
-	return re.ReplaceAllString(name, " ")
+	return reBrackets.ReplaceAllString(name, " ")
 }
 // extractEpisodeInfo checks the string for season/episode patterns.
 func extractEpisodeInfo(name string) MediaInfo {
@@ -549,13 +572,27 @@ func extractEpisodeInfo(name string) MediaInfo {
 }
 
 // removeQualityTags strips known quality keywords from the name.
+//
+// The lowercased haystack is computed once and only refreshed after an actual
+// replacement. Most of the ~150 patterns do not appear in any given filename,
+// so the cheap Contains check against the cached lowercase string avoids both
+// a per-pattern ToLower of the whole name and the string-builder allocation in
+// the common no-match case.
 func removeQualityTags(name string) string {
-	for _, q := range qualityPatterns {
-		name = replaceCaseInsensitive(name, q, " ")
+	lower := strings.ToLower(name)
+	for i, q := range qualityPatterns {
+		ql := qualityPatternsLower[i]
+		if !strings.Contains(lower, ql) {
+			continue
+		}
+		name = replaceLowerKnown(name, lower, q, ql, " ")
+		lower = strings.ToLower(name)
 	}
 
 	// Also handle "4k" lowercase variant (the pattern "4K" above covers uppercase)
-	name = replaceCaseInsensitive(name, "4k", " ")
+	if strings.Contains(lower, "4k") {
+		name = replaceLowerKnown(name, lower, "4k", "4k", " ")
+	}
 
 	return name
 }
@@ -578,8 +615,7 @@ func removeEpisodePatterns(name string) string {
 // removeStandaloneQualities removes standalone numbers that look like
 // resolution indicators (480, 720, 1080, 2160, etc.)
 func removeStandaloneQualities(name string) string {
-	re := regexp.MustCompile(`\b(480|720|1080|2160)\b`)
-	return re.ReplaceAllString(name, " ")
+	return reStandaloneQuality.ReplaceAllString(name, " ")
 }
 
 // knownReleaseGroups are common release group suffixes stripped from filenames.
@@ -679,16 +715,28 @@ func formatTwoDigits(prefix string, n int) string {
 	return prefix + itoa(n)
 }
 
-// replaceCaseInsensitive replaces all case-insensitive occurrences of old
-// with new in s.
+// replaceCaseInsensitive replaces all case-insensitive occurrences of old with
+// new in s. It is a convenience wrapper over replaceLowerKnown that computes
+// the lowercase forms itself; hot paths should call replaceLowerKnown directly
+// with precomputed lowercase strings.
 func replaceCaseInsensitive(s, old, new string) string {
-	lower := strings.ToLower(s)
-	oldLower := strings.ToLower(old)
+	return replaceLowerKnown(s, strings.ToLower(s), old, strings.ToLower(old), new)
+}
+
+// replaceLowerKnown replaces all case-insensitive occurrences of old with new,
+// using a precomputed lowercase form of both the haystack (sLower) and the
+// needle (oldLower) so neither is recomputed here. old and oldLower must have
+// equal length (true for the ASCII quality tags), which keeps offset
+// arithmetic valid against the original string s.
+func replaceLowerKnown(s, sLower, old, oldLower, new string) string {
+	if !strings.Contains(sLower, oldLower) {
+		return s
+	}
 
 	var b strings.Builder
 	last := 0
 	for {
-		i := strings.Index(lower[last:], oldLower)
+		i := strings.Index(sLower[last:], oldLower)
 		if i < 0 {
 			break
 		}

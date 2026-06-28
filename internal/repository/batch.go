@@ -78,6 +78,11 @@ func (b *BatchInserter) Flush(ctx context.Context) error {
 	b.mu.Unlock()
 
 	if err := b.flushBatch(ctx, batch); err != nil {
+		// Write failed: return the rows to the buffer so they are retried on the
+		// next flush instead of being silently lost.
+		b.mu.Lock()
+		b.buf = append(batch, b.buf...)
+		b.mu.Unlock()
 		return err
 	}
 

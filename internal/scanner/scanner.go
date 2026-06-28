@@ -19,10 +19,11 @@ type Scanner struct {
 	workers   int
 	queueSize int
 
-	taskCh   chan ScanTask
-	resultCh chan ScanResult
-	doneCh   chan struct{}
-	stats    *Stats
+	taskCh      chan ScanTask
+	resultCh    chan ScanResult
+	doneCh      chan struct{}
+	noMoreTasks chan struct{} // closed by the monitor when all work is drained
+	stats       *Stats
 
 	wg            sync.WaitGroup
 	pending       sync.WaitGroup
@@ -47,13 +48,14 @@ func New(cfg Config) *Scanner {
 	}
 
 	return &Scanner{
-		client:    cfg.Client,
-		workers:   cfg.Workers,
-		queueSize: cfg.QueueSize,
-		taskCh:    make(chan ScanTask, cfg.QueueSize),
-		resultCh:  make(chan ScanResult, cfg.QueueSize),
-		doneCh:    make(chan struct{}),
-		stats:     newStats(),
+		client:      cfg.Client,
+		workers:     cfg.Workers,
+		queueSize:   cfg.QueueSize,
+		taskCh:      make(chan ScanTask, cfg.QueueSize),
+		resultCh:    make(chan ScanResult, cfg.QueueSize),
+		doneCh:      make(chan struct{}),
+		noMoreTasks: make(chan struct{}),
+		stats:       newStats(),
 	}
 }
 
@@ -61,10 +63,9 @@ func New(cfg Config) *Scanner {
 // pool and returns immediately. Results are delivered via the Results channel.
 // Call Wait to block until scanning completes.
 func (s *Scanner) Start(ctx context.Context, seeds []ScanTask) {
-	if s.started.Load() {
+	if !s.started.CompareAndSwap(false, true) {
 		return
 	}
-	s.started.Store(true)
 
 	// Count seed tasks as pending work
 	s.pending.Add(len(seeds))
@@ -77,17 +78,26 @@ func (s *Scanner) Start(ctx context.Context, seeds []ScanTask) {
 
 	// Enqueue seed tasks asynchronously to avoid blocking when
 	// len(seeds) > queueSize. Workers are already running, so the
-	// channel will drain as soon as they start consuming.
+	// channel will drain as soon as they start consuming. Respect
+	// cancellation so we never block on a full queue after shutdown, and
+	// release the pending count for any seeds we never managed to send.
 	go func() {
-		for _, task := range seeds {
-			s.taskCh <- task
+		for i, task := range seeds {
+			select {
+			case <-ctx.Done():
+				s.pending.Add(i - len(seeds)) // Done() the unsent remainder
+				return
+			case s.taskCh <- task:
+			}
 		}
 	}()
 
-	// Monitor: when all pending tasks are done, signal workers to stop
+	// Monitor: when all pending tasks are done, signal workers to stop.
+	// We close a dedicated signal channel rather than taskCh, so concurrent
+	// senders (seed loop and enqueue) can never panic on a closed channel.
 	go func() {
 		s.pending.Wait()
-		close(s.taskCh)
+		close(s.noMoreTasks)
 	}()
 }
 
@@ -153,13 +163,16 @@ func (s *Scanner) worker(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			// Drain remaining tasks from taskCh so pending can reach zero
-			// and the monitor goroutine can close the channel cleanly.
+			// and the monitor goroutine can signal shutdown cleanly.
 			s.drainPending()
 			return
-		case task, ok := <-s.taskCh:
-			if !ok {
-				return
-			}
+		case <-s.noMoreTasks:
+			// All work is drained (pending hit zero). Because a task is only
+			// marked Done after it is fully processed, an unconsumed task in the
+			// buffer keeps pending > 0 — so when this fires, taskCh is empty and
+			// no work is dropped.
+			return
+		case task := <-s.taskCh:
 			s.activeWorkers.Add(1)
 			s.processTask(ctx, task)
 			s.pending.Done()

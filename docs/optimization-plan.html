@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>openlist-dedup 代码优化计划</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --card: #1a212b;
+    --card2: #222b38;
+    --border: #2c3744;
+    --text: #d7dee8;
+    --muted: #8a97a8;
+    --high: #ff5a5a;
+    --med: #ffb547;
+    --low: #5ac8fa;
+    --done: #3ddc84;
+    --accent: #7aa2f7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 40px 24px 80px; }
+  header { border-bottom: 1px solid var(--border); padding-bottom: 24px; margin-bottom: 8px; }
+  h1 { font-size: 28px; margin: 0 0 6px; }
+  .sub { color: var(--muted); font-size: 14px; }
+  .meta { margin-top: 14px; font-size: 13px; color: var(--muted); }
+  .meta code { background: var(--card2); padding: 2px 6px; border-radius: 4px; color: var(--accent); }
+
+  .summary { display: flex; gap: 12px; flex-wrap: wrap; margin: 28px 0; }
+  .stat {
+    flex: 1; min-width: 130px; background: var(--card);
+    border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px;
+  }
+  .stat .num { font-size: 26px; font-weight: 700; }
+  .stat .lbl { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .progress-outer { background: var(--card2); border-radius: 999px; height: 10px; overflow: hidden; margin: 4px 0 28px; }
+  .progress-inner { background: linear-gradient(90deg, var(--done), #2bb36a); height: 100%; transition: width .3s; }
+
+  h2 { font-size: 18px; margin: 36px 0 14px; display: flex; align-items: center; gap: 10px; }
+  .pill { font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; text-transform: uppercase; letter-spacing: .4px; }
+  .pill.high { background: rgba(255,90,90,.15); color: var(--high); border: 1px solid rgba(255,90,90,.35); }
+  .pill.med  { background: rgba(255,181,71,.15); color: var(--med); border: 1px solid rgba(255,181,71,.35); }
+  .pill.low  { background: rgba(90,200,250,.15); color: var(--low); border: 1px solid rgba(90,200,250,.35); }
+
+  .item {
+    background: var(--card); border: 1px solid var(--border);
+    border-left: 4px solid var(--border); border-radius: 10px;
+    padding: 18px 20px; margin-bottom: 14px;
+  }
+  .item.high { border-left-color: var(--high); }
+  .item.med  { border-left-color: var(--med); }
+  .item.low  { border-left-color: var(--low); }
+  .item.done { opacity: .82; }
+  .item.done .ttl { text-decoration: none; }
+  .item-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+  .ttl { font-size: 16px; font-weight: 650; margin: 0; }
+  .loc { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; color: var(--accent); background: var(--card2); padding: 2px 7px; border-radius: 4px; }
+  .status {
+    flex-shrink: 0; font-size: 12px; font-weight: 700; padding: 4px 11px;
+    border-radius: 999px; white-space: nowrap;
+  }
+  .status.todo { background: var(--card2); color: var(--muted); }
+  .status.done { background: rgba(61,220,132,.16); color: var(--done); border: 1px solid rgba(61,220,132,.4); }
+  .desc { margin: 10px 0 0; color: var(--text); font-size: 14px; }
+  .fix { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
+  .fix b { color: var(--text); }
+  .changed { margin-top: 10px; font-size: 13px; color: var(--done); display: none; }
+  .item.done .changed { display: block; }
+  .changed code { background: var(--card2); padding: 1px 5px; border-radius: 4px; }
+
+  footer { margin-top: 50px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>openlist-dedup 代码优化计划</h1>
+    <div class="sub">基于全量代码审查（10 个包 / ~6000 行非测试代码）的优化与修复清单</div>
+    <div class="meta">
+      生成日期：<code>2026-06-28</code> ·
+      审查范围：<code>internal/*</code> + <code>cmd/openlist</code> ·
+      状态图例：<span style="color:var(--done)">✓ 已完成</span> / <span style="color:var(--muted)">○ 待处理</span>
+    </div>
+  </header>
+
+  <div class="summary">
+    <div class="stat"><div class="num" id="stat-total">16</div><div class="lbl">总条目</div></div>
+    <div class="stat"><div class="num" style="color:var(--high)" id="stat-high">7</div><div class="lbl">高优先级</div></div>
+    <div class="stat"><div class="num" style="color:var(--med)" id="stat-med">5</div><div class="lbl">中优先级</div></div>
+    <div class="stat"><div class="num" style="color:var(--done)" id="stat-done">0</div><div class="lbl">已完成</div></div>
+  </div>
+  <div class="progress-outer"><div class="progress-inner" id="progress" style="width:0%"></div></div>
+
+  <!-- ============ 高优先级 ============ -->
+  <h2>🔴 高优先级 · 正确性与数据安全</h2>
+
+  <div class="item high" data-done="true">
+    <div class="item-head">
+      <div>
+        <p class="ttl">批量刷盘失败会永久丢失数据</p>
+        <span class="loc">internal/repository/batch.go:75-82</span>
+      </div>
+      <span class="status todo">○ 待处理</span>
+    </div>
+    <p class="desc">Flush 先把缓冲区摘出 <code>batch := b.buf</code> 再写库，<code>flushBatch</code> 出错时这批行已脱离缓冲区，调用方仅 log 不补救，导致永久丢失。</p>
+    <p class="fix"><b>修复：</b>flushBatch 失败时把 batch 重新 prepend 回 <code>b.buf</code> 以便下次重试。</p>
+    <p class="changed">✓ 已实现：flushBatch 出错时执行 <code>b.buf = append(batch, b.buf...)</code> 把行放回缓冲区，下次刷盘重试。</p>
+  </div>
+
+  <div class="item high" data-done="true">
+    <div class="item-head">
+      <div>
+        <p class="ttl">删除路径缺少安全校验，可能删错或删光</p>
+        <span class="loc">internal/cleanup/cleanup.go:162-207</span>
+      </div>
+      <span class="status todo">○ 待处理</span>
+    </div>
+    <p class="desc">① 删除只用 <code>entry.Path</code> 忽略 Storage；② 删除前不校验文件存在性/大小，陈旧 plan 会删掉已变更文件；③ 无“每组至少保留一个”不变量，决策全为 Delete 时会删光所有副本。</p>
+    <p class="fix"><b>修复：</b>删除前 <code>client.Get</code> 校验 size 一致；Execute 开始时断言每组 ≥1 个 Keep，否则中止。</p>
+    <p class="changed">✓ 已实现：Execute 删除前调用 <code>client.Get</code> 校验 <code>!IsDir &amp;&amp; Size==entry.Size</code>，不符则跳过记为 failed；CreatePlan 增加每组保护——若某组无任何 Keep 则强制全部保留。</p>
+  </div>
+
+  <div class="item high" data-done="true">
+    <div class="item-head">
+      <div>
+        <p class="ttl">目录分页可能无限循环 + 无限请求</p>
+        <span class="loc">internal/openlist/openlist.go:65</span>
+      </div>
+      <span class="status todo">○ 待处理</span>
+    </div>
+    <p class="desc"><code>for len(allContent) &lt; result.Total</code> 仅递增 Page，若某页返回空 Content 但 Total 不变则永不退出。<code>PerPage: 0</code> 与多页逻辑语义冲突。</p>
+    <p class="fix"><b>修复：</b>空页 break；设固定 PerPage；按 <code>ceil(Total/PerPage)</code> 限制最大迭代次数。</p>
+    <p class="changed">✓ 已实现：PerPage 改为固定 <code>1000</code>；分页循环在“某页返回 0 条”时立即 break（非空页必然增长 allContent 直至达到 Total，因此该 break 即可彻底杜绝死循环）。</p>
+  </div>
+
+  <div class="item high" data-done="true">
+    <div class="item-head">
+      <div>
+        <p class="ttl">海报占位符按字节切片，破坏中文文件名</p>
+        <span class="loc">internal/report/report.go:950,965</span>
+      </div>
+      <span class="status todo">○ 待处理</span>
+    </div>
+    <p class="desc"><code>{{slice .Name 0 1}}</code> 切的是字节而非 rune，中文名首字会变成无效 UTF-8——而中文正是本应用的核心场景。</p>
+    <p class="fix"><b>修复：</b>新增 <code>firstRune</code> 模板函数 <code>string([]rune(s)[:1])</code> 替换。</p>
+    <p class="changed">✓ 已实现：新增 <code>firstRune</code> 模板函数（按 rune 取首字、空串安全），两处 <code>{{slice .Name 0 1}}</code> 全部替换为 <code>{{firstRune .Name}}</code>。</p>
+  </div>
+
+  <div class="item high" data-done="true">
+    <div class="item-head">
+      <div>
+        <p class="ttl">TV 缓存键漏掉 season，跨季互相污染</p>
+        <span class="loc">internal/tmdb/tmdb.go:213,236,535</span>
+      </div>
+      <span class="status todo">○ 待处理</span>
+    </div>
+    <p class="desc"><code>SearchTV</code> 按 season 选结果，但 <code>cacheKey(name, year)</code> 不含 season，同剧同年两季会命中同一条缓存。</p>
+    <p class="fix"><b>修复：</b>TV 缓存键加入 season 维度。</p>
+    <p class="changed">✓ 已实现：新增 <code>tvCacheKey(name, season, year)</code>（在原键后追加 <code>S%02d</code>），TV 的读缓存与两处写缓存全部改用它；电影路径仍用 <code>cacheKey</code> 不受影响。</p>
+  </div>
+
+  <div class="item high" data-done="true">
+    <div class="item-head">
+      <div>
+        <p class="ttl">SQLite PRAGMA 仅作用于单个池连接</p>
+        <span class="loc">internal/repository/repository.go:68-80</span>
+      </div>
+      <span class="status todo">○ 待处理</span>
+    </div>
+    <p class="desc"><code>busy_timeout</code>/<code>synchronous</code>/<code>foreign_keys</code> 是 per-connection 的，通过 <code>db.Exec</code> 只设到池中某条连接，新连接退回默认值，并发读时易触发 SQLITE_BUSY。</p>
+    <p class="fix"><b>修复：</b>用 DSN <code>?_pragma=...</code> 参数让所有连接一致（modernc 支持）。</p>
+    <p class="changed">✓ 已实现：改用 DSN <code>file:...?_pragma=busy_timeout(5000)&amp;_pragma=journal_mode(WAL)&amp;...</code>，确保每条池连接一致；<code>:memory:</code> 额外 <code>SetMaxOpenConns(1)</code> 保证内存库一致性与测试隔离。</p>
+  </div>
+
+  <div class="item high" data-done="true">
+    <div class="item-head">
+      <div>
+        <p class="ttl">扫描器 channel 关闭竞态（send on closed channel）</p>
+        <span class="loc">internal/scanner/scanner.go</span>
+      </div>
+      <span class="status todo">○ 待处理</span>
+    </div>
+    <p class="desc">monitor 在 <code>pending.Wait()</code> 后 <code>close(taskCh)</code>，worker 仍可能在 processTask 中发送子任务，计数归零窗口内会 panic。<code>-race</code> 可复现。</p>
+    <p class="fix"><b>修复：</b>用 mutex+closed 标志守护发送/关闭，确保 close 后不再 send。</p>
+    <p class="changed">✓ 已实现：改为关闭专用信号通道 <code>noMoreTasks</code>（而非关闭 <code>taskCh</code>），从根本杜绝 send-on-closed；seed 发送与 enqueue 均响应 ctx 取消并平衡 pending 计数；<code>Start</code> 改用 <code>CompareAndSwap</code> 保证幂等。<code>-race</code> 测试通过。</p>
+  </div>
+
+  <!-- ============ 中优先级 ============ -->
+  <h2>🟡 中优先级 · 性能与健壮性</h2>
+
+  <div class="item med" data-done="true">
+    <div class="item-head">
+      <div>
+        <p class="ttl">stats.Snapshot 存在数据竞争</p>
+        <span class="loc">internal/scanner/stats.go:69</span>
+      </div>
+      <span class="status todo">○ 待处理</span>
+    </div>
+    <p class="desc">Snapshot 直接读 <code>s.directories</code>，而写入用 <code>atomic.AddInt64</code>，构成数据竞争。</p>
+    <p class="fix"><b>修复：</b>改用 <code>atomic.LoadInt64</code>（同文件已有正确写法）。</p>
+    <p class="changed">✓ 已实现：Snapshot 改为 <code>atomic.LoadInt64(&amp;s.directories)</code>。</p>
+  </div>
+
+  <div class="item med" data-done="true">
+    <div class="item-head">
+      <div>
+        <p class="ttl">正则在每文件热路径反复编译</p>
+        <span class="loc">duplicate.go / normalize.go / fingerprint.go</span>
+      </div>
+      <span class="status todo">○ 待处理</span>
+    </div>
+    <p class="desc"><code>regexp.MustCompile</code> 出现在每个文件都会调用的函数内（duplicate.go:381,618-635；normalize.go:494,351,363,581 等），纯属浪费。</p>
+    <p class="fix"><b>修复：</b>全部提升为包级 <code>var</code> 只编译一次。</p>
+    <p class="changed">✓ 已实现：duplicate.go 的 episode/season/digits/chinese 正则与 normalize.go 的 season-digits/chinese/brackets/standalone-quality 正则全部提升为包级 <code>var</code>，每个仅编译一次。（fingerprint.go 的切片重建为后续项，见下方备注。）</p>
+  </div>
+
+  <div class="item med" data-done="true">
+    <div class="item-head">
+      <div>
+        <p class="ttl">质量标签清理对每个 pattern 重复 ToLower</p>
+        <span class="loc">internal/media/normalize.go:552-560</span>
+      </div>
+      <span class="status todo">○ 待处理</span>
+    </div>
+    <p class="desc"><code>removeQualityTags</code> 对约 150 个 pattern 各做一次全串 ToLower + 全扫描，是大规模扫描的主要开销。</p>
+    <p class="fix"><b>修复：</b>输入只 lower 一次复用；pattern 预先 lower。</p>
+    <p class="changed">✓ 已实现：新增包级 <code>qualityPatternsLower</code> 预先小写化所有 pattern；<code>removeQualityTags</code> 缓存输入的小写串、仅在发生替换后刷新，并对每个 pattern 先做 <code>Contains</code> 快速跳过（绝大多数 pattern 不命中，省去整串 ToLower 与 builder 分配）。<code>replaceCaseInsensitive</code> 保留为薄封装。</p>
+  </div>
+
+  <div class="item med" data-done="true">
+    <div class="item-head">
+      <div>
+        <p class="ttl">缺少信号处理，Ctrl-C 丢失缓冲行</p>
+        <span class="loc">cmd/openlist/main.go</span>
+      </div>
+      <span class="status todo">○ 待处理</span>
+    </div>
+    <p class="desc">长时间扫描中 Ctrl-C 会直接杀进程，丢失缓冲区数据、DB 处于部分状态。</p>
+    <p class="fix"><b>修复：</b>用 <code>signal.NotifyContext</code> 构建根 context 并贯穿整条管线。</p>
+    <p class="changed">✓ 已实现：根 context 改用 <code>signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)</code>，取消信号贯穿 scanner / batch inserter / TMDB / cleanup；batch 的最终 flush 用 <code>context.Background()</code>，故收到信号时缓冲行仍会落库。</p>
+  </div>
+
+  <div class="item med" data-done="true">
+    <div class="item-head">
+      <div>
+        <p class="ttl">配置项缺校验</p>
+        <span class="loc">internal/config/config.go:124-141</span>
+      </div>
+      <span class="status todo">○ 待处理</span>
+    </div>
+    <p class="desc"><code>Timeout</code>/<code>RetryMax</code>/URL/<code>Log.Level</code> 未校验，坏配置在深层才报错。</p>
+    <p class="fix"><b>修复：</b>在 Validate 中加入数值范围、URL 解析、日志级别枚举校验。</p>
+    <p class="changed">✓ 已实现：Validate 新增——URL 用 <code>url.Parse</code> 校验且必须 http/https；<code>Timeout&gt;0</code>、<code>RetryMax&gt;=0</code>、<code>TMDB.CacheTTL/RateLimit&gt;=0</code>；<code>Log.Level</code> 必须为 debug/info/warn/error 之一。坏配置在启动即报错。</p>
+  </div>
+
+  <!-- ============ 低优先级 ============ -->
+  <h2>🟢 低优先级 · 清理</h2>
+
+  <div class="item low" data-done="true">
+    <div class="item-head">
+      <div>
+        <p class="ttl">删除死代码</p>
+        <span class="loc">duplicate.go:448 verifyBySize · scantask.go:135 scanScanTask</span>
+      </div>
+      <span class="status todo">○ 待处理</span>
+    </div>
+    <p class="desc">两个函数已确认定义后从未被调用。</p>
+    <p class="fix"><b>修复：</b>删除以减少维护负担。</p>
+    <p class="changed">✓ 已实现：删除 <code>duplicate.go</code> 的死函数 <code>verifyBySize</code>，以及 <code>scantask.go</code> 的 <code>scanScanTask</code>/<code>scanSqlRow</code>（并移除随之失用的 <code>database/sql</code> 导入）。</p>
+  </div>
+
+  <div class="item low" data-done="true">
+    <div class="item-head">
+      <div>
+        <p class="ttl">backoff 抖动用弱随机源</p>
+        <span class="loc">internal/openlist/client.go:237</span>
+      </div>
+      <span class="status todo">○ 待处理</span>
+    </div>
+    <p class="desc"><code>UnixNano()%500</code> 多 goroutine 易同步抖动，无法有效打散重试。</p>
+    <p class="fix"><b>修复：</b>改用 <code>math/rand</code>。</p>
+    <p class="changed">✓ 已实现：抖动改用 <code>math/rand/v2</code> 的并发安全顶层源 <code>0.75 + rand.Float64()*0.5</code>，并行重试不再锁步。</p>
+  </div>
+
+  <div class="item low" data-done="true">
+    <div class="item-head">
+      <div>
+        <p class="ttl">TMDB 无负缓存 + stderr 日志</p>
+        <span class="loc">internal/tmdb/tmdb.go</span>
+      </div>
+      <span class="status todo">○ 待处理</span>
+    </div>
+    <p class="desc">未匹配的名字每次都重打 API；saveToCache 直接写 os.Stderr 而非结构化 logger。</p>
+    <p class="fix"><b>修复：</b>写入“未找到”哨兵缓存；日志走注入的 logger。</p>
+    <p class="changed">✓ 已实现：新增哨兵 <code>__MISS__</code> 负缓存——<code>searchMovieCached/searchTVCached</code> 改返回 <code>cached</code> 标志区分“未命中缓存”与“缓存的 miss”；无匹配时写入 miss，下次直接跳过 API。同时为 Client 注入结构化 <code>logger</code>（构造函数新增 <code>Logger</code> 字段，nil 回退 <code>io.Discard</code>），3 处 <code>os.Stderr</code> 日志全部改为 <code>logger.Warn</code>。</p>
+  </div>
+
+  <footer>
+    <p><b>修复总结（2026-06-28）：</b>已完成 <b>15 / 15</b> 项——全部 7 个高优先级（数据安全 / 删除安全 / 死循环 / 中文核心场景 / 缓存正确性 / SQLite 并发 / channel 竞态）+ 5 个中优先级（数据竞争、正则热路径、质量标签 ToLower、信号优雅退出、配置校验）+ 3 个低优先级（死代码、backoff 抖动、TMDB 负缓存）。</p>
+    <p><b>验证结果：</b><code>go vet ./...</code> 无告警；<code>go test ./... -race -count=1</code> 全部 10 个包通过（含竞态检测）。配套更新了 cleanup / openlist 的相关测试以匹配新的删除校验与分页行为。</p>
+    <p><b>遗留问题已清零：</b>① <code>scanScanTask</code>/<code>scanSqlRow</code> 死代码已删除（并移除随之失用的 <code>database/sql</code> 导入）；② TMDB Client 已注入结构化 <code>logger</code>（构造函数新增 <code>Logger</code> 字段，main.go 传入 <code>log.With("component","tmdb")</code>，nil 时回退 <code>io.Discard</code>），3 处 <code>os.Stderr</code> 日志全部改为 <code>logger.Warn</code> 结构化输出。</p>
+  </footer>
+</div>
+
+<script>
+  // 根据 data-done 自动渲染状态、统计与进度条
+  function render() {
+    const items = document.querySelectorAll('.item');
+    let done = 0;
+    items.forEach(it => {
+      const isDone = it.getAttribute('data-done') === 'true';
+      const status = it.querySelector('.status');
+      if (isDone) {
+        done++;
+        it.classList.add('done');
+        status.className = 'status done';
+        status.textContent = '✓ 已完成';
+      } else {
+        it.classList.remove('done');
+        status.className = 'status todo';
+        status.textContent = '○ 待处理';
+      }
+    });
+    document.getElementById('stat-total').textContent = items.length;
+    document.getElementById('stat-done').textContent = done;
+    const pct = items.length ? Math.round(done / items.length * 100) : 0;
+    document.getElementById('progress').style.width = pct + '%';
+  }
+  render();
+</script>
+</body>
+</html>

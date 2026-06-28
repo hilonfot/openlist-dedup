@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"openlist/internal/cleanup"
@@ -84,7 +86,12 @@ func run() int {
 		}
 	}
 
-	ctx := context.Background()
+	// Root context cancelled on SIGINT/SIGTERM so a long scan can be
+	// interrupted cleanly: cancellation propagates to the scanner, batch
+	// inserter, TMDB lookups and cleanup, letting deferred flushes finish
+	// instead of losing buffered rows on a hard kill.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	// OpenList client
 	olClient := openlist.New(
@@ -275,6 +282,7 @@ func run() int {
 					CacheTTL:     time.Duration(cfg.TMDB.CacheTTL) * time.Second,
 					RateLimit:    cfg.TMDB.RateLimit,
 					Mapping:      mapping,
+					Logger:       log.With("component", "tmdb"),
 				})
 				for _, g := range groups {
 					name := g.NormalizedName

@@ -679,6 +679,13 @@ func Generate(path string, data ReportData) error {
 			return "unique"
 		},
 		"add": func(a, b int) int { return a + b },
+		"firstRune": func(s string) string {
+			r := []rune(s)
+			if len(r) == 0 {
+				return ""
+			}
+			return string(r[0])
+		},
 	}).Parse(reportTemplate)
 	if err != nil {
 		return fmt.Errorf("parse template: %w", err)
@@ -947,7 +954,7 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
 <div class="card"><div class="poster-wall">
 {{range .Movies}}<a href="{{.OpenListURL}}" target="_blank" class="poster-card">
 <div class="poster-img-wrap">
-{{if .PosterURL}}<img class="poster-img" src="{{.PosterURL}}" loading="lazy">{{else}}<div class="poster-placeholder">{{slice .Name 0 1}}</div>{{end}}
+{{if .PosterURL}}<img class="poster-img" src="{{.PosterURL}}" loading="lazy">{{else}}<div class="poster-placeholder">{{firstRune .Name}}</div>{{end}}
 {{if .DupBadge}}<span class="poster-badge poster-badge-{{.DupBadge}}">{{.DupBadge}}</span>{{end}}
 {{if .Rating}}<span class="poster-rating">{{.Rating}}</span>{{end}}
 </div>
@@ -962,7 +969,7 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
 <div class="card"><div class="poster-wall">
 {{range .Shows}}<a href="{{.OpenListURL}}" target="_blank" class="poster-card">
 <div class="poster-img-wrap">
-{{if .PosterURL}}<img class="poster-img" src="{{.PosterURL}}" loading="lazy">{{else}}<div class="poster-placeholder">{{slice .Name 0 1}}</div>{{end}}
+{{if .PosterURL}}<img class="poster-img" src="{{.PosterURL}}" loading="lazy">{{else}}<div class="poster-placeholder">{{firstRune .Name}}</div>{{end}}
 {{if .DupBadge}}<span class="poster-badge poster-badge-{{.DupBadge}}">{{.DupBadge}}</span>{{end}}
 {{if .Rating}}<span class="poster-rating">{{.Rating}}</span>{{end}}
 </div>

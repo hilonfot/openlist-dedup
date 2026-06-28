@@ -236,6 +236,21 @@ func TestExecute_RealDelete(t *testing.T) {
 			Path string `json:"path"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
+
+		// Execute verifies the file via /api/fs/get before deleting it.
+		if r.URL.Path == "/api/fs/get" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"code": 200,
+				"data": map[string]interface{}{
+					"name":   "del.mkv",
+					"path":   req.Path,
+					"size":   500000000,
+					"is_dir": false,
+				},
+			})
+			return
+		}
+
 		deletedPath = req.Path
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code":    200,

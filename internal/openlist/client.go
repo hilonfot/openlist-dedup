@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand/v2"
 	"net/http"
 	"sync"
 	"time"
@@ -233,7 +234,9 @@ func backoffDuration(attempt int) time.Duration {
 	if wait > float64(maxRetryWait) {
 		wait = float64(maxRetryWait)
 	}
-	// Add ±25% jitter
-	jitter := 0.75 + float64(time.Now().UnixNano()%500)/1000.0
+	// Add ±25% jitter. math/rand/v2's top-level source is concurrency-safe and
+	// well-distributed, so parallel requests don't back off in lockstep the way
+	// the old time.Now().UnixNano()%500 source could.
+	jitter := 0.75 + rand.Float64()*0.5
 	return time.Duration(wait * jitter)
 }
